@@ -1,0 +1,50 @@
+[workspace]
+members = ["crates/efema-proto"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+description = "A sync relay for local-first apps: it keeps changes in order and cannot read them"
+authors = ["Kirill Lakhtachev <lahtachev@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/lacodda/efema"
+homepage = "https://lacodda.github.io/efema/"
+
+[workspace.dependencies]
+efema-proto = { path = "crates/efema-proto", version = "0.1.0" }
+
+# The wire format: CBOR with integer keys, decoded strictly. Derives keep each
+# message one definition; unknown keys are skipped, so a field added later does
+# not break an older peer.
+minicbor = { version = "2", features = ["alloc", "derive"] }
+sha2 = "0.11"
+
+anyhow = "1"
+# HTTP/1.1 only: TLS and HTTP/2 belong to the reverse proxy in front (the
+# relay never terminates TLS itself), and HTTP/1.1 is what that proxy speaks to
+# its upstream.
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "7"
+form_urlencoded = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+getrandom = "0.4"
+rusqlite = { version = "0.40", features = ["bundled"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Tests talk to the relay over a real socket, the way a client does.
+reqwest = { version = "0.13", default-features = false }
+tempfile = "3"
+
+# A release binary is downloaded far more often than it is built. Link-time
+# optimization across one codegen unit and a stripped symbol table roughly
+# halve it, at the cost of a slower release build.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

@@ -1,0 +1,18 @@
+[package]
+name = "efema-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The wire format of efema: streams, positions, cursors and epochs as a client and a relay exchange them"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+documentation = "https://docs.rs/efema-proto"
+keywords = ["sync", "local-first", "relay", "cbor"]
+categories = ["encoding", "network-programming"]
+
+[dependencies]
+minicbor.workspace = true
+sha2.workspace = true
