@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/efema-proto"]
+members = ["crates/efema-proto", "crates/efema-server"]
 resolver = "3"
 
 [workspace.package]

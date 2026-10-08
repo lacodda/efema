@@ -1,0 +1,39 @@
+[package]
+name = "efema-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The efema relay: keeps sealed batches in order, by cursor, for the devices that sync through it"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+documentation = "https://lacodda.github.io/efema/"
+keywords = ["sync", "local-first", "relay", "server"]
+categories = ["network-programming", "web-programming::http-server"]
+
+[[bin]]
+name = "efema-server"
+path = "src/main.rs"
+
+[dependencies]
+efema-proto.workspace = true
+
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+dirs.workspace = true
+form_urlencoded.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+minicbor.workspace = true
+reqwest.workspace = true
+tempfile.workspace = true
