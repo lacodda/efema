@@ -29,5 +29,9 @@ none.
 
 - Lay out the repository on the line's standard
 
+### CI
+
+- Ask for a crates.io token only when there is something to publish
+
 
 
