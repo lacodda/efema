@@ -16,7 +16,6 @@ schema version a relay checks before reading. Any change that breaks either -
 or the cursor's hash chain, which every client holds - gets a "Breaking
 Changes" section here, with the way across or a plain statement that there is
 none.
-
 """
 body = """
 {% if version %}\
@@ -32,7 +31,7 @@ body = """
 {% endfor %}
 {% endif %}\
 {% for group, commits in commits | group_by(attribute="group") %}
-### {{ group }}
+### {{ group | striptags | trim }}
 {% for commit in commits %}
 - {{ commit.message | upper_first }}\
 {% endfor %}
@@ -49,14 +48,17 @@ protect_breaking_commits = true
 filter_commits = false
 tag_pattern = "v[0-9].*"
 sort_commits = "oldest"
+# git-cliff orders groups by name; the comment in front of each sets the
+# order a reader wants - what changed for them first - and is stripped from
+# the heading.
 commit_parsers = [
-  { message = "^feat", group = "Features" },
-  { message = "^fix", group = "Bug Fixes" },
-  { message = "^perf", group = "Performance" },
-  { message = "^refactor", group = "Refactoring" },
-  { message = "^docs", group = "Documentation" },
-  { message = "^test", group = "Testing" },
-  { message = "^build", group = "Build" },
-  { message = "^ci", group = "CI" },
+  { message = "^feat", group = "<!-- 0 -->Features" },
+  { message = "^fix", group = "<!-- 1 -->Bug Fixes" },
+  { message = "^perf", group = "<!-- 2 -->Performance" },
+  { message = "^refactor", group = "<!-- 3 -->Refactoring" },
+  { message = "^docs", group = "<!-- 4 -->Documentation" },
+  { message = "^test", group = "<!-- 5 -->Testing" },
+  { message = "^build", group = "<!-- 6 -->Build" },
+  { message = "^ci", group = "<!-- 7 -->CI" },
   { message = "^chore", skip = true },
 ]
