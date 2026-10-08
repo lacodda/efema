@@ -1,0 +1,134 @@
+/* The product's accent, and the two shades Starlight wants beside it - mixed
+   from the accent rather than written down, so changing the colour is one
+   value in each theme. */
+:root {
+	--brand-accent: #5470E8;
+	--sl-color-accent: var(--brand-accent);
+	--sl-color-accent-high: color-mix(in oklab, var(--brand-accent) 45%, white);
+	--sl-color-accent-low: color-mix(in oklab, var(--brand-accent) 30%, black);
+}
+
+:root[data-theme='light'] {
+	--sl-color-accent: color-mix(in oklab, var(--brand-accent) 85%, black);
+	--sl-color-accent-high: color-mix(in oklab, var(--brand-accent) 55%, black);
+	--sl-color-accent-low: color-mix(in oklab, var(--brand-accent) 18%, white);
+}
+
+/* The mark is a square hex tile: let it fill the bar height, beside the
+   wordmark it belongs with. */
+.site-title {
+	gap: 0.4rem;
+}
+
+.site-title img {
+	width: auto;
+	height: 2.5rem;
+}
+
+/* ------------------------------------------------------------------ hero -- */
+
+/* Starlight splits the hero into two columns on wide screens and expects an
+   image in the right one; the install panel fills it instead. Between 50rem and
+   68rem the panel would squeeze the copy into a ribbon, so the hero stays one
+   column until there is room for both. */
+@media (min-width: 50rem) and (max-width: 67.999rem) {
+	.hero {
+		grid-template-columns: 100%;
+	}
+
+	.hero > .hero-html {
+		width: 100%;
+		max-width: none;
+		margin-inline: 0;
+	}
+}
+
+@media (min-width: 68rem) {
+	.hero {
+		grid-template-columns: 6fr 5fr;
+		gap: 2rem;
+	}
+
+	.hero > .hero-html {
+		width: 100%;
+		max-width: none;
+		align-self: center;
+	}
+}
+
+/* What it is comes before how to install it, on every width: on a phone the
+   panel would otherwise open the page above the name. */
+.hero > .hero-html {
+	order: 2;
+}
+
+.hero h1 {
+	letter-spacing: -0.02em;
+}
+
+/* A terminal-looking panel with the three lines that get a relay running. */
+.ef-install {
+	width: 100%;
+	border: 1px solid var(--sl-color-gray-5);
+	border-radius: 0.75rem;
+	background: var(--sl-color-black);
+	overflow: hidden;
+	text-align: start;
+	box-shadow: 0 1px 3px rgb(0 0 0 / 0.2);
+}
+
+.ef-install__bar {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	padding: 0.6rem 0.9rem;
+	border-bottom: 1px solid var(--sl-color-gray-5);
+	background: var(--sl-color-gray-6);
+}
+
+.ef-install__dot {
+	width: 0.6rem;
+	height: 0.6rem;
+	border-radius: 50%;
+	background: var(--sl-color-gray-4);
+}
+
+.ef-install__dot:first-child {
+	background: var(--sl-color-accent);
+}
+
+.ef-install__os {
+	margin-inline-start: auto;
+	font-size: var(--sl-text-xs);
+	color: var(--sl-color-gray-3);
+}
+
+.ef-install__body {
+	margin: 0;
+	padding: 0.9rem;
+	font-family: var(--__sl-font-mono);
+	/* Short on purpose, so the lines never wrap; anything longer lives on the
+	   Getting Started page. */
+	font-size: var(--sl-text-code-sm);
+	line-height: 1.9;
+	overflow-x: auto;
+	color: var(--sl-color-gray-1);
+}
+
+.ef-install__prompt {
+	color: var(--sl-color-accent-high);
+	user-select: none;
+}
+
+.ef-install__comment {
+	color: var(--sl-color-gray-3);
+}
+
+/* ----------------------------------------------------------- splash body -- */
+
+/* Below the hero the splash page runs prose the width of the window, and a
+   150-character line is hard to follow back to its start. A column, aligned
+   with the hero's copy. */
+[data-has-hero] .sl-markdown-content {
+	max-width: 46rem;
+}

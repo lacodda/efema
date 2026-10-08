@@ -1,0 +1,25 @@
+# efema
+
+> A sync relay for local-first apps: it keeps changes in order and cannot read them
+
+Devices append batches of opaque entries to named streams; the relay gives them
+positions, links them into a hash chain and hands every device what came after
+its cursor. It never decodes, merges or judges an entry. The repository was
+started by [lyrn](https://github.com/lacodda/lyrn) as its `workspace` form;
+`lyrn.toml` says which revision of the lacodda line's standard it carries.
+Everything below is written for people and agents alike: there is no second set
+of instructions kept elsewhere.
+
+## Docs
+
+- [README](README.md): what it is, how to install it, what working with it looks like
+- [Documentation site](https://lacodda.github.io/efema/llms.txt): the model, the threat model, every command and the protocol, as Markdown
+- [Contributing](CONTRIBUTING.md): the gate to run before a commit, where things live, the two rules every change keeps
+- [Architecture decisions](docs/adr/README.md): why it is built the way it is, one decision per file
+- [Changelog](CHANGELOG.md): what each release changed
+
+## Optional
+
+- [Security policy](SECURITY.md): how to report a vulnerability, privately
+- [Code of Conduct](CODE_OF_CONDUCT.md): how people taking part treat each other
+- [License](LICENSE): MIT

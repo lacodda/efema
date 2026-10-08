@@ -1,0 +1,218 @@
+---
+title: Protocol
+description: Version 1 of the efema protocol - the four endpoints, the CBOR bodies with their keys, the refusals and the limits.
+---
+
+What a client and a relay say to each other. The Rust definitions are the
+[`efema-proto`](https://docs.rs/efema-proto) crate, which both sides build on;
+this page is the same contract for anyone writing a client in another
+language.
+
+## Endpoints
+
+| Method | Path | What |
+| --- | --- | --- |
+| `POST` | `/v1/streams/{name}/entries` | append a [batch](#batch) |
+| `GET` | `/v1/streams/{name}/entries` | read a [page](#page) after a cursor |
+| `GET` | `/v1/wait` | wait until a stream moves; answers with [heads](#heads) |
+| `GET` | `/health` | `200` and `ok` while the relay is up |
+
+Everything under `/v1` answers in CBOR (`application/cbor`), refusals included,
+and with `Cache-Control: no-store`. A later major version of the protocol
+gets a prefix of its own.
+
+`{name}` is a stream name: one to 64 characters of lowercase letters, digits,
+`-`, `_` and `.`, starting with a letter or a digit.
+
+## Encoding
+
+Bodies are CBOR maps keyed by small integers - the numbers in the tables below.
+A decoder ignores keys it does not know, so a field added later breaks nobody;
+a required field stays for the life of the protocol version. Byte strings are
+CBOR byte strings: an entry travels as its own bytes, with no base64 and no
+growth. A body is exactly one message: bytes after it are refused.
+
+Types: `uint` is an unsigned integer; an *identity* is a byte string of exactly
+16 bytes, a *link* one of exactly 32.
+
+## Writing: `POST /v1/streams/{name}/entries`
+
+The body is a [batch](#batch), sent with `Content-Type: application/cbor`. The
+answer is a [written](#written) record.
+
+The relay gives the entries consecutive positions after the stream's head, in
+the order listed, all of them or none. The first batch under a name creates the
+stream. A batch in an epoch below the stream's is refused; one above it raises
+the stream.
+
+### batch
+
+| Key | Field | Type | Meaning |
+| --- | --- | --- | --- |
+| 0 | `epoch` | uint, 32-bit | the epoch the entries are written in |
+| 1 | `entries` | array of byte strings, at least one | the entries, opaque to the relay |
+
+### written
+
+| Key | Field | Type | Meaning |
+| --- | --- | --- | --- |
+| 0 | `stream` | identity | the stream written to - new if this batch created it |
+| 1 | `epoch` | uint | the stream's epoch after the write |
+| 2 | `first` | uint | the position of the batch's first entry |
+| 3 | `last` | uint | the position of its last entry |
+
+## Reading: `GET /v1/streams/{name}/entries`
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `after` | none: from the start | a [cursor](#cursors); entries after it are returned |
+| `limit` | 1000 | the most entries to return, from 1 to 10000 |
+
+The answer is a [page](#page). A page ends at `limit` entries, or earlier once
+its entries' data passes 8 MiB - but never empty while there is an entry to
+return, however large. When the last entry's position is below `head`, there
+is more: read again with the cursor of that entry.
+
+### page
+
+| Key | Field | Type | Meaning |
+| --- | --- | --- | --- |
+| 0 | `stream` | identity | the stream read |
+| 1 | `epoch` | uint | the stream's current epoch |
+| 2 | `head` | uint | the stream's last position at the moment of the read |
+| 3 | `entries` | array of [entry](#entry) | in position order, without gaps |
+
+### entry
+
+| Key | Field | Type | Meaning |
+| --- | --- | --- | --- |
+| 0 | `seq` | uint | the entry's position, from 1 |
+| 1 | `epoch` | uint | the epoch it was written in |
+| 2 | `hash` | link | its link in the stream's chain |
+| 3 | `data` | byte string | the bytes as the writer sent them |
+
+## Cursors
+
+In a query string a cursor is `<seq>.<stream>.<hash>`: the position as a
+decimal number without leading zeros, then the identity and the link in
+lowercase hexadecimal. One spelling per cursor. The cursor of a reader that has
+an entry is that entry's `seq` and `hash` with the page's `stream`; a reader
+that knows a stream but has none of it holds position 0 and the chain's first
+link.
+
+### The chain
+
+Links are SHA-256. With `||` for concatenation and integers big-endian:
+
+```
+genesis = SHA-256("efema/chain/v1/genesis" || stream)
+link(n) = SHA-256(link(n-1) || seq: u64 || epoch: u32 || length(data): u64 || data)
+```
+
+where `link(0)` is `genesis` and `stream` is the identity's 16 bytes.
+
+## Waiting: `GET /v1/wait`
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `watch` | required, up to 64 | a stream to watch: `<name>`, or `<name>:<cursor>`; repeat for each stream |
+| `timeout` | 30 | seconds to wait, from 0 to 60; 0 only looks |
+
+The relay answers as soon as a watched stream differs from what the waiter
+knows, or when the timeout runs out. With a cursor, "differs" is any other
+identity or head than the cursor's - including a stream that is gone. Without
+one, it is a stream with any entries at all.
+
+The answer is a [heads](#heads) record listing every watched stream that
+differs; it is empty after a timeout, and when the relay is stopping. It never
+carries entries: the waiter reads what it missed.
+
+### heads
+
+| Key | Field | Type | Meaning |
+| --- | --- | --- | --- |
+| 0 | `heads` | array of [head](#head) | the watched streams worth reading now |
+
+### head
+
+| Key | Field | Type | Meaning |
+| --- | --- | --- | --- |
+| 0 | `stream` | text | the stream's name |
+| 1 | `id` | identity, or absent | its identity; absent if no stream has the name |
+| 2 | `head` | uint | its last position; 0 if there is no stream |
+
+## Refusals
+
+A refusal has a status and a [problem](#problem) body. Programs act on `code`;
+`message` is for people and may change.
+
+| Status | `code` | When |
+| --- | --- | --- |
+| 400 | `bad_request` | a body that is not the expected CBOR, an empty batch, an invalid name or query parameter - unknown parameters included |
+| 404 | `stream_not_found` | a read of a stream that does not exist |
+| 404 | `not_found` | a path the relay does not serve |
+| 405 | `method_not_allowed` | a path it serves, with another method |
+| 409 | `stream_replaced` | a cursor of another identity than the stream's |
+| 409 | `cursor_ahead` | a cursor past the stream's head; `head` says where the stream ends |
+| 409 | `cursor_diverged` | a cursor whose link the stream does not have at that position |
+| 409 | `epoch_behind` | a batch in an epoch below the stream's; `epoch` says the stream's |
+| 413 | `too_large` | a body over the limit; `limit` says it |
+| 415 | `unsupported_media_type` | a batch not sent as `application/cbor` |
+| 500 | `internal` | something failed on the relay's side; its log says what |
+
+A client keeps codes it does not know: a later relay may add reasons.
+
+### problem
+
+| Key | Field | Type | Meaning |
+| --- | --- | --- | --- |
+| 0 | `code` | text | the reason, from the table above |
+| 1 | `message` | text | the reason, in a sentence |
+| 2 | `head` | uint, optional | with `cursor_ahead` |
+| 3 | `epoch` | uint, optional | with `epoch_behind` |
+| 4 | `limit` | uint, optional | with `too_large`, in bytes |
+
+## Limits
+
+<!-- limits: the test release_consistency holds these to efema_server::limits -->
+
+| Limit | Value |
+| --- | --- |
+| request body | 16777216 bytes (16 MiB) |
+| entries in a page, by default | 1000 |
+| entries in a page, at most | 10000 |
+| entry data in a page | 8388608 bytes (8 MiB) |
+| wait, by default | 30 seconds |
+| wait, at most | 60 seconds |
+| streams in one wait | 64 |
+| stream name | 64 characters |
+
+## Example
+
+A first write to `notes` and the read that follows, in CBOR's diagnostic
+notation:
+
+```
+POST /v1/streams/notes/entries
+{0: 1, 1: [h'…' / 640 bytes /, h'…' / 560 bytes /]}
+
+200
+{0: h'11c3cd7e971ccb544d78c74ae8d814ba', 1: 1, 2: 1, 3: 2}
+
+GET /v1/streams/notes/entries
+
+200
+{0: h'11c3cd7e971ccb544d78c74ae8d814ba', 1: 1, 2: 2, 3: [
+  {0: 1, 1: 1, 2: h'0d72a730…' / 32 bytes /, 3: h'…' / 640 bytes /},
+  {0: 2, 1: 1, 2: h'19cdc65a…' / 32 bytes /, 3: h'…' / 560 bytes /}
+]}
+```
+
+The reader's cursor is now
+`2.11c3cd7e971ccb544d78c74ae8d814ba.19cdc65a0a991e8d40e19813aad37514cf0a734663686eb4433285f7d49190ed`.
+
+## Related
+
+- [Streams and cursors](/efema/concepts/streams-and-cursors/) - what these
+  messages mean.
+- [`serve`](/efema/reference/serve/) - the relay that answers them.

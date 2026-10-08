@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="170" viewBox="0 0 720 170"><rect width="720" height="170" rx="14" fill="#1B2126"/><g transform="translate(36 25) scale(1.2)"><polygon points="50,5 89,27.5 89,72.5 50,95 11,72.5 11,27.5" fill="#232A30" stroke="#232A30" stroke-width="9" stroke-linejoin="round"/><polygon points="50,5 89,27.5 89,72.5 50,95 11,72.5 11,27.5" fill="none" stroke="#5470E8" stroke-opacity="0.75" stroke-width="3.5" stroke-linejoin="round"/><text x="50" y="52" text-anchor="middle" font-family='"Cascadia Code","JetBrains Mono",Consolas,ui-monospace,monospace' font-weight="700" font-size="30" fill="#5470E8">ef</text><g transform="translate(0 6)">
+      <rect x="33" y="55" width="9"  height="4" rx="2" fill="#5470E8" fill-opacity="0.45"/>
+      <rect x="46" y="55" width="21" height="4" rx="2" fill="#5470E8" fill-opacity="0.25"/>
+      <rect x="33" y="62" width="9"  height="4" rx="2" fill="#5470E8" fill-opacity="0.45"/>
+      <rect x="46" y="62" width="21" height="4" rx="2" fill="#5470E8" fill-opacity="0.25"/>
+      <rect x="33" y="69" width="9"  height="4" rx="2" fill="#5470E8" fill-opacity="0.45"/>
+      <rect x="46" y="69" width="8"  height="4" rx="2" fill="#5470E8" fill-opacity="0.25"/>
+      <circle cx="61" cy="71" r="3.6" fill="#5470E8" fill-opacity="0.55"/></g></g><text x="205" y="84" font-family='"Cascadia Code","JetBrains Mono",Consolas,ui-monospace,monospace' font-weight="700" font-size="46" fill="#F4F5F0">efema</text><text x="207" y="116" font-family='"Cascadia Code","JetBrains Mono",Consolas,ui-monospace,monospace' font-size="15" fill="#9AA3A8">a sync relay for local-first apps</text><rect x="205" y="132" width="180" height="4" rx="2" fill="#5470E8"/></svg>
