@@ -25,44 +25,53 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
+      # Every crate, in dependency order: crates.io resolves a dependency at
+      # publish time and refuses a package whose dependency it cannot see yet.
+      # A crate whose version is on crates.io already is left out, so a run can
+      # be repeated - after a first version published by hand, or a run that
+      # failed halfway - and a run with nothing left to publish asks for no
+      # token at all.
+      - name: Find what is not on crates.io yet
+        id: pending
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '[.packages[].version] | unique | .[0]')
+          pending=""
+          for crate in efema-proto efema-server; do
+            if curl -sf "https://crates.io/api/v1/crates/$crate/$version" -H 'user-agent: efema-release' > /dev/null; then
+              echo "$crate $version is on crates.io already"
+            else
+              pending="$pending $crate"
+            fi
+          done
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "crates=${pending# }" >> "$GITHUB_OUTPUT"
       # The first version of each crate is published by hand: a trusted
       # publisher cannot be attached to a crate that does not exist yet. After
       # that each crate needs its own publisher on crates.io (repository
-      # lacodda/efema, workflow publish.yml) - a missing one fails with a
+      # lacodda/efema, workflow publish.yml) - a missing one fails here with a
       # message about an invalid token, which is not what is wrong.
       - name: Get a crates.io token (OIDC trusted publishing)
+        if: steps.pending.outputs.crates != ''
         uses: rust-lang/crates-io-auth-action@v1
         id: auth
-      # From the workspace table, which is where the single version lives.
-      - name: Read the version being published
-        id: version
-        run: echo "value=$(cargo metadata --no-deps --format-version 1 | jq -r '[.packages[].version] | unique | .[0]')" >> "$GITHUB_OUTPUT"
-      # In dependency order: crates.io resolves a dependency at publish time and
-      # refuses a package whose dependency it cannot see yet. A crate whose
-      # version is on crates.io already is skipped, so a run can be repeated -
-      # after a first version published by hand, or a run that failed halfway.
       - name: Publish
+        if: steps.pending.outputs.crates != ''
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-          VERSION: ${{ steps.version.outputs.value }}
+          VERSION: ${{ steps.pending.outputs.version }}
+          CRATES: ${{ steps.pending.outputs.crates }}
         run: |
-          published() {
-            curl -sf "https://crates.io/api/v1/crates/$1/$VERSION" -H 'user-agent: efema-release' > /dev/null
-          }
-          for crate in efema-proto efema-server; do
-            if published "$crate"; then
-              echo "$crate $VERSION is on crates.io already"
-              continue
-            fi
+          for crate in $CRATES; do
             cargo publish --package "$crate"
             # The index does not carry the new version the instant publish
             # returns, and the next crate resolves this one from it.
             for attempt in $(seq 1 30); do
-              if published "$crate"; then
-                break
+              if curl -sf "https://crates.io/api/v1/crates/$crate/$VERSION" -H 'user-agent: efema-release' > /dev/null; then
+                continue 2
               fi
               echo "attempt $attempt: $crate $VERSION is not indexed yet"
               sleep 10
             done
-            published "$crate" || { echo "$crate $VERSION never appeared in the index" >&2; exit 1; }
+            echo "$crate $VERSION never appeared in the index" >&2
+            exit 1
           done
