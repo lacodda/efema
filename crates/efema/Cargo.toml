@@ -1,0 +1,32 @@
+[package]
+name = "efema"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The efema client: sync sealed changes between devices through a relay that cannot read them"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+documentation = "https://docs.rs/efema"
+keywords = ["sync", "local-first", "encryption", "relay", "client"]
+categories = ["network-programming", "cryptography"]
+
+[dependencies]
+efema-proto.workspace = true
+lacodda-seal.workspace = true
+
+getrandom.workspace = true
+minicbor.workspace = true
+reqwest.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+# Path only: a dev-dependency without a version is left out when the crate
+# is published, so the client does not wait for the relay on crates.io.
+efema-server = { path = "../efema-server" }
+tempfile.workspace = true
+tokio.workspace = true

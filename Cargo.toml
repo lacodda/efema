@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/efema-proto", "crates/efema-server", "crates/lacodda-seal"]
+members = ["crates/efema-proto", "crates/efema-server", "crates/efema", "crates/lacodda-seal"]
 resolver = "3"
 
 [workspace.package]
@@ -14,6 +14,8 @@ homepage = "https://lacodda.github.io/efema/"
 
 [workspace.dependencies]
 efema-proto = { path = "crates/efema-proto", version = "0.1.0" }
+efema = { path = "crates/efema", version = "0.1.0" }
+efema-server = { path = "crates/efema-server", version = "0.1.0" }
 lacodda-seal = { path = "crates/lacodda-seal", version = "0.1.0" }
 
 # The wire format: CBOR with integer keys, decoded strictly. Derives keep each
@@ -45,8 +47,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
-# Tests talk to the relay over a real socket, the way a client does.
-reqwest = { version = "0.13", default-features = false }
+# The client's HTTP: HTTP/1.1 like the relay, rustls with the platform's
+# trust store, so a relay behind a proxy with a private CA (Caddy's
+# `tls internal`) is trusted once the CA is installed on the device.
+# Tests talk to the relay over a real socket through it, the way a client does.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 tempfile = "3"
 
 # Argon2id is meant to be expensive, and an unoptimized build makes it about
