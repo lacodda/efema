@@ -27,23 +27,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       # Every crate, in dependency order: crates.io resolves a dependency at
       # publish time and refuses a package whose dependency it cannot see yet.
-      # A crate whose version is on crates.io already is left out, so a run can
-      # be repeated - after a first version published by hand, or a run that
-      # failed halfway - and a run with nothing left to publish asks for no
-      # token at all.
+      # Each crate at its own version - lacodda-seal does not move with efema
+      # (docs/adr/0008-lacodda-seal-in-this-workspace.md). A version already on
+      # crates.io is left out, so a run can be repeated - after a first version
+      # published by hand, or a run that failed halfway - and a run with
+      # nothing left to publish asks for no token at all.
       - name: Find what is not on crates.io yet
         id: pending
         run: |
-          version=$(cargo metadata --no-deps --format-version 1 | jq -r '[.packages[].version] | unique | .[0]')
+          metadata=$(cargo metadata --no-deps --format-version 1)
           pending=""
-          for crate in efema-proto efema-server; do
+          for crate in efema-proto lacodda-seal efema-server efema; do
+            version=$(echo "$metadata" | jq -r --arg name "$crate" '.packages[] | select(.name == $name) | .version')
             if curl -sf "https://crates.io/api/v1/crates/$crate/$version" -H 'user-agent: efema-release' > /dev/null; then
               echo "$crate $version is on crates.io already"
             else
-              pending="$pending $crate"
+              pending="$pending $crate@$version"
             fi
           done
-          echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "crates=${pending# }" >> "$GITHUB_OUTPUT"
       # The first version of each crate is published by hand: a trusted
       # publisher cannot be attached to a crate that does not exist yet. After
@@ -58,20 +59,21 @@ jobs:
         if: steps.pending.outputs.crates != ''
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-          VERSION: ${{ steps.pending.outputs.version }}
           CRATES: ${{ steps.pending.outputs.crates }}
         run: |
-          for crate in $CRATES; do
+          for pending in $CRATES; do
+            crate=${pending%@*}
+            version=${pending#*@}
             cargo publish --package "$crate"
             # The index does not carry the new version the instant publish
             # returns, and the next crate resolves this one from it.
             for attempt in $(seq 1 30); do
-              if curl -sf "https://crates.io/api/v1/crates/$crate/$VERSION" -H 'user-agent: efema-release' > /dev/null; then
+              if curl -sf "https://crates.io/api/v1/crates/$crate/$version" -H 'user-agent: efema-release' > /dev/null; then
                 continue 2
               fi
-              echo "attempt $attempt: $crate $VERSION is not indexed yet"
+              echo "attempt $attempt: $crate $version is not indexed yet"
               sleep 10
             done
-            echo "$crate $VERSION never appeared in the index" >&2
+            echo "$crate $version never appeared in the index" >&2
             exit 1
           done
