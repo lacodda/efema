@@ -18,8 +18,10 @@ $ sqlite3 /var/lib/efema/relay.sqlite3 ".backup '/backups/relay-2026-10-08.sqlit
 
 Or stop the relay, copy the directory, and start it again.
 
-The backup holds what the relay holds - sealed entries, once the client
-library seals them - so it is as safe to keep elsewhere as the relay itself.
+The backup holds what the relay holds - sealed entries, and each stream's key
+locked under its passphrase - so it is as safe to keep elsewhere as the relay
+itself, and no safer: whoever has it can try passphrases against the locks
+([threat model](/efema/concepts/threat-model/)).
 
 ## Restoring
 

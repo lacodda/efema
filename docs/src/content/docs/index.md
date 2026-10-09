@@ -55,7 +55,7 @@ silently read past.
 
 - **It does not read your data.** Entries are opaque bytes: the relay stores
   and returns them without decoding anything. The client library seals them on
-  the device before they leave it.
+  the device before they leave it, under a key the relay never has.
 - **It does not merge.** Two devices that changed the same thing both have
   their batch kept, in order. Deciding what the result is belongs to the app,
   which knows what its data means - the relay does not, by design.
@@ -64,7 +64,9 @@ silently read past.
 
 ## Status
 
-0.1.0 is the relay and its wire format: streams, positions, cursors, epochs and
-waiting for news. The Rust client library - with sealing built in, so there is
-no way to send anything unsealed - comes next, in 0.2.0. Until then a client is
-anything that speaks [the protocol](/efema/reference/protocol/).
+0.2.0 is the relay and the Rust client library,
+[`efema`](https://docs.rs/efema): every entry sealed on the device with a key
+the relay never has, cursors that survive restarts, epochs on both sides. The
+relay has no access control of its own yet - it arrives in 0.5.0 - so run it on
+loopback or a network you trust, behind a proxy for TLS.
+[Syncing an app](/efema/guides/syncing-an-app/) is where to start.

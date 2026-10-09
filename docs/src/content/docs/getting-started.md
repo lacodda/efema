@@ -54,10 +54,16 @@ photos  6964d409  2            3  144.0 KiB  2026-10-08 18:36
 
 ## What talks to it
 
-Clients speak [the protocol](/efema/reference/protocol/): CBOR over HTTP, four
-endpoints. The Rust client library, `efema`, arrives in 0.2.0: it keeps the
-cursor, retries, waits for news - and seals every entry on the device, with no
-way to send one unsealed.
+Apps talk to it through the Rust client library, [`efema`](https://docs.rs/efema):
+it seals every entry on the device - there is no way to send one unsealed -
+keeps the device's cursor and waits for news.
+[Syncing an app](/efema/guides/syncing-an-app/) shows how;
+[A synced folder](/efema/guides/a-synced-folder/) is a complete example to run
+against the relay you just started.
+
+Anything else that speaks [the protocol](/efema/reference/protocol/) - CBOR
+over HTTP, four endpoints - is a client too, if it seals the way
+[Sealing](/efema/concepts/sealing/) describes.
 
 ## Next
 
@@ -65,5 +71,6 @@ way to send one unsealed.
   relay keeps.
 - [Threat model](/efema/concepts/threat-model/) - what the relay can see, and
   what it cannot.
+- [Syncing an app](/efema/guides/syncing-an-app/) - the client library.
 - [Commands](/efema/reference/commands/) - the data directory, the logs and
   every flag.

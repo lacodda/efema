@@ -42,3 +42,6 @@ the crates that depend on it.
   the version but is not a stable interface before 1.0.
 - Every crate needs a trusted publisher on crates.io, and the first version of
   each is published by hand.
+- A fourth crate joined in 0.2.0: `lacodda-seal`, the line's sealing, shared
+  with sefy and versioned on its own
+  ([ADR 0008](0008-lacodda-seal-in-this-workspace.md)).

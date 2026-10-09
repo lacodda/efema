@@ -11,8 +11,13 @@ CI also builds the API docs with warnings as errors, builds on the declared
 MSRV, and builds the documentation site.
 
 The tests talk to a real relay over a real socket - an in-process one in
-`crates/efema-server/tests/relay.rs`, the built binary in `tests/binary.rs` -
-never to a mock. A test that passes against a mock says the mock works.
+`crates/efema-server/tests/relay.rs` and `crates/efema/tests/client.rs`, the
+built binary in `tests/binary.rs` - never to a mock. A test that passes against
+a mock says the mock works. Where a relay has to misbehave, a transport stands
+between the client and the real relay and changes what it said.
+
+The sealing formats are frozen by a test whose values were computed outside
+Rust (Python's `cryptography`); a change there is a new format version.
 
 `tests/release_consistency.rs` holds the published face of the project to the
 code: one version everywhere, one README, absolute links, every command with
@@ -28,17 +33,25 @@ on exactly that version, so the number cannot quietly rot.
 | --- | --- |
 | `crates/efema-proto/` | The wire format: names, identities, cursors, epochs, the hash chain, the CBOR messages |
 | `crates/efema-server/` | The relay: SQLite storage, the HTTP surface, waiting, and the `efema-server` binary |
-| `crates/efema-server/tests/` | The relay over a real socket, and the binary as an operator runs it |
+| `crates/efema-server/tests/` | The relay over a real socket, the binary as an operator runs it, and the published face held to the code |
+| `crates/efema/` | The client library: the transport, the device's state, sealing entries, pull and push, `doctor` |
+| `crates/efema/tests/` | The client against a real relay - and against the real relay behind a transport that misbehaves on purpose |
+| `crates/lacodda-seal/` | The line's sealing: a key, a sealed blob, a key locked under a passphrase |
+| `examples/mini-vault/` | An example app: a folder synced between devices, with merging; tested as two processes |
 | `assets/` | The mark's master SVGs and the rasters drawn from them |
 | `docs/` | The documentation site (Starlight) and `docs/adr/`, the architecture decisions |
 
-The crates share one version, set in `[workspace.package]`, and are released
-together. Why three crates: [ADR 0003](docs/adr/0003-three-crates.md).
+The efema crates share one version, set in `[workspace.package]`, and are
+released together ([ADR 0003](docs/adr/0003-three-crates.md)). `lacodda-seal`
+carries a version of its own, which moves only when it changes
+([ADR 0008](docs/adr/0008-lacodda-seal-in-this-workspace.md)); `mini-vault` is
+not published.
 
 Two rules the code keeps, and every change has to keep too:
 
 - **The relay does not look inside an entry.** It stores bytes and returns
-  them. Anything that would need to decode an entry on the relay - to merge,
+  them. The client seals every entry; it has no path that sends one unsealed,
+  and none may be added. Anything that would need to decode an entry on the relay - to merge,
   to index, to validate - belongs to the app, not here.
 - **Merging and conflicts belong to the app.** The relay gives every reader the
   same facts in the same order and has no opinion on which version is right.

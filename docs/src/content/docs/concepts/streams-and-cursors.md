@@ -130,5 +130,8 @@ stream that is never going to move.
 - **Merging and conflicts.** Two devices that edit the same note offline both
   write their batch, and both are kept, in order. Which edit wins, or how they
   combine, depends on what a note is - which only the app knows.
-- **Echoes.** A device reads its own batches back along with everyone else's.
-  It knows the positions it wrote at; skipping them is its decision.
+- **Echoes.** A device reads its own batches back along with everyone else's,
+  and the client marks them as its own. They still belong to the order: two
+  devices can change one thing before either hears from the other, and only
+  the stream says which change came last - so an app applies its own entries
+  in their place rather than skipping them.
