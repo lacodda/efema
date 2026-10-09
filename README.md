@@ -38,13 +38,13 @@ $ mini-vault --relay http://127.0.0.1:2451 --folder ./desktop --state ./desktop-
 applied 0 change(s), sent 1
 $ mini-vault --relay http://127.0.0.1:2451 --folder ./laptop --state ./laptop-state sync --once
 applied 0 change(s), sent 2
-conflict: both versions kept, the other one as notes/plan (conflict 975f1b04).md
+conflict: both versions kept, the other one as notes/plan (conflict 249b3cca).md
 $ mini-vault --relay http://127.0.0.1:2451 --folder ./laptop --state ./laptop-state doctor
-relay    http://127.0.0.1:2451 - answered in 2 ms
-stream   vault - stream 650365e8, epoch 1, 7 entries
+relay    http://127.0.0.1:2451 - answered in 3 ms
+stream   vault - stream 946ece38, epoch 1, 7 entries
 cursor   at 7 - up to date
-key      c154b5aad4ec9958 - locked 2026-10-09 (today), argon2id 64 MiB × 3 × 4
-device   234d67dc
+key      4f9947f501e49908 - locked 2026-10-09 (today), argon2id 64 MiB × 3 × 4
+device   28263325
 epoch    1 - written, and read up to
 ```
 
@@ -54,13 +54,13 @@ is the stream's key, locked under the passphrase; the rest is ciphertext:
 ```console
 $ efema-server streams vault --data ./relay
 SEQ  EPOCH      SIZE  HASH
-  1  1         118 B  552122ad
-  2  1         140 B  d7c6acb3
-  3  1         131 B  a7d91dae
-  4  1      47.0 KiB  f22285cd
-  5  1         184 B  9244d195
-  6  1         170 B  dd30f6be
-  7  1         172 B  4a90e820
+  1  1         172 B  6185a8ef
+  2  1         141 B  8f124ce6
+  3  1         132 B  16651889
+  4  1      47.0 KiB  2a0aad78
+  5  1         185 B  aceb0973
+  6  1         171 B  2092dd63
+  7  1         173 B  3a5190d8
 ```
 
 ## What you get

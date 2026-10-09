@@ -189,11 +189,11 @@ println!("{}", notes.doctor().await);
 ```
 
 ```console
-relay    http://127.0.0.1:2451 - answered in 2 ms
-stream   vault - stream 650365e8, epoch 1, 7 entries
+relay    http://127.0.0.1:2451 - answered in 3 ms
+stream   vault - stream 946ece38, epoch 1, 7 entries
 cursor   at 7 - up to date
-key      c154b5aad4ec9958 - locked 2026-10-09 (today), argon2id 64 MiB × 3 × 4
-device   234d67dc
+key      4f9947f501e49908 - locked 2026-10-09 (today), argon2id 64 MiB × 3 × 4
+device   28263325
 epoch    1 - written, and read up to
 ```
 

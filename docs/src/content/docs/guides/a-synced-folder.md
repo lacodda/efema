@@ -38,26 +38,26 @@ $ mini-vault --relay http://127.0.0.1:2451 --folder ./desktop --state ./desktop-
 applied 0 change(s), sent 1
 $ mini-vault --relay http://127.0.0.1:2451 --folder ./laptop --state ./laptop-state sync --once
 applied 0 change(s), sent 2
-conflict: both versions kept, the other one as notes/plan (conflict 975f1b04).md
+conflict: both versions kept, the other one as notes/plan (conflict 249b3cca).md
 $ mini-vault --relay http://127.0.0.1:2451 --folder ./desktop --state ./desktop-state sync --once
 applied 2 change(s), sent 0
-conflict: both versions kept, the other one as notes/plan (conflict 975f1b04).md
+conflict: both versions kept, the other one as notes/plan (conflict 249b3cca).md
 $ ls laptop/notes
-2026  plan (conflict 975f1b04).md  plan.md
+2026  plan (conflict 249b3cca).md  plan.md
 ```
 
 The laptop's edit reached the stream second and was made without seeing the
 desktop's, so it keeps the name, and the desktop's version - written by device
-`975f1b04` - sits beside it on both devices. Lines from the relay's log of the
+`249b3cca` - sits beside it on both devices. Lines from the relay's log of the
 same run, timestamps left out - positions and sizes, nothing more:
 
 ```console
-INFO vault: wrote 1 entry (118 bytes) at 1, epoch 1
-INFO vault: wrote 3 entries (48354 bytes) at 2..4, epoch 1
+INFO vault: wrote 1 entry (172 bytes) at 1, epoch 1
+INFO vault: wrote 3 entries (48357 bytes) at 2..4, epoch 1
 INFO vault: read 4 entries after 0
-INFO vault: wrote 1 entry (184 bytes) at 5, epoch 1
+INFO vault: wrote 1 entry (185 bytes) at 5, epoch 1
 INFO vault: read 4 entries after 1
-INFO vault: wrote 2 entries (342 bytes) at 6..7, epoch 1
+INFO vault: wrote 2 entries (344 bytes) at 6..7, epoch 1
 ```
 
 ## What the app does

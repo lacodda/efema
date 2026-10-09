@@ -13,6 +13,22 @@ across or a plain statement that there is none.
 `lacodda-seal` keeps a version of its own (0.1.0 since efema 0.2.0); its
 changes are listed under the efema release they shipped with.
 
+## [0.3.0] - 2026-10-09
+
+### Breaking Changes
+
+- **Compress entries and change passphrases without resealing**: key entries carry the key's seal, and entries are
+written in format 2; streams written by 0.2 are not read.
+
+### Features
+
+- Compress entries and change passphrases without resealing
+
+### Testing
+
+- Show that the relay keeps and logs nothing readable
+
+
 ## [0.2.0] - 2026-10-09
 
 ### Features
