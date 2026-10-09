@@ -334,6 +334,30 @@ async fn a_relay_cannot_alter_an_entry_unnoticed() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_entry_no_client_wrote_is_refused_not_skipped() {
+    let relay = TestRelay::start().await;
+    let device = Device::new();
+    let client = device.open(relay.transport(), "notes", 1).await;
+    client.push([b"sealed"]).await.unwrap();
+    // Something that speaks the protocol but does not seal writes into the
+    // stream: the relay takes it, the client does not.
+    let plain = efema::wire::Batch { epoch: Epoch(1), entries: vec![b"plain text".to_vec()], stream: None };
+    relay.transport().append(&name("notes"), &plain).await.unwrap();
+
+    let pulled = client.pull().await.unwrap();
+    assert_eq!(data(&pulled.entries), [b"sealed".as_slice()]);
+    client.ack(&pulled).await.unwrap();
+    let foreign = client.pull().await.unwrap_err();
+    assert!(matches!(foreign, Error::ForeignEntry { seq: 3, .. }), "{foreign:?}");
+
+    // A stream that starts with one cannot be joined: there is no key in
+    // front of it.
+    relay.transport().append(&name("plain"), &plain).await.unwrap();
+    let refused = Device::new().try_open(relay.transport(), "plain", 1, Secret::Passphrase(PASSPHRASE)).await;
+    assert!(matches!(refused, Err(Error::ForeignEntry { seq: 1, .. })), "{refused:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_wait_wakes_on_a_new_entry_and_not_before() {
     let relay = TestRelay::start().await;
     let (a, b) = (Device::new(), Device::new());
