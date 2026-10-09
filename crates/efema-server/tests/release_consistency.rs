@@ -11,8 +11,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use efema_proto::limits;
 use efema_proto::wire::ProblemCode;
-use efema_server::limits;
 
 /// Root of the repository, two levels above this crate.
 fn repo_root() -> PathBuf {
@@ -52,19 +52,35 @@ fn manifest_field(file: &str, section: &str, key: &str) -> String {
     panic!("`{key}` not found in the {section} block of {file}");
 }
 
-/// The crates of the workspace, as directory names under `crates/`.
+/// The members of the workspace, as paths from the root.
 fn members() -> Vec<String> {
     let manifest = read("Cargo.toml");
     let block = manifest.split("members = [").nth(1).expect("the workspace lists its members");
     let block = &block[..block.find(']').expect("the members list ends")];
-    let members: Vec<String> = block
-        .split(',')
-        .map(|m| m.trim().trim_matches('"'))
-        .filter(|m| !m.is_empty())
-        .map(|m| m.strip_prefix("crates/").expect("members live under crates/").to_string())
-        .collect();
-    assert!(members.len() >= 2, "could not read the workspace members: {members:?}");
+    let members: Vec<String> =
+        block.split(',').map(|m| m.trim().trim_matches('"')).filter(|m| !m.is_empty()).map(str::to_string).collect();
+    assert!(members.len() >= 4, "could not read the workspace members: {members:?}");
     members
+}
+
+/// The crates published to crates.io, by name: every member under `crates/`.
+/// The rest - the examples - must say `publish = false`.
+fn published() -> Vec<String> {
+    let crates: Vec<String> = members().iter().filter_map(|m| m.strip_prefix("crates/")).map(str::to_string).collect();
+    for member in members().iter().filter(|m| !m.starts_with("crates/")) {
+        assert_eq!(
+            manifest_field(&format!("{member}/Cargo.toml"), "[package]", "publish"),
+            "false",
+            "{member} is outside crates/ and would be published"
+        );
+    }
+    crates
+}
+
+/// The crates released with efema's version. `lacodda-seal` carries its own
+/// (docs/adr/0008-lacodda-seal-in-this-workspace.md).
+fn efema_crates() -> Vec<String> {
+    published().into_iter().filter(|c| c.starts_with("efema")).collect()
 }
 
 fn help(args: &[&str]) -> String {
@@ -107,23 +123,29 @@ fn docs_pages() -> Vec<(String, String)> {
 #[test]
 fn every_crate_carries_the_one_version() {
     let version = manifest_field("Cargo.toml", "[workspace.package]", "version");
-    for member in members() {
+    for member in efema_crates() {
         let manifest = format!("crates/{member}/Cargo.toml");
         assert_eq!(
             manifest_field(&manifest, "[package]", "version.workspace"),
             "true",
-            "{manifest} sets a version of its own; the crates are released together"
+            "{manifest} sets a version of its own; the efema crates are released together"
         );
     }
-    let dependency = read("Cargo.toml")
-        .lines()
-        .find(|line| line.starts_with("efema-proto = "))
-        .expect("the workspace declares efema-proto")
-        .to_string();
-    assert!(
-        dependency.contains(&format!("version = \"{version}\"")),
-        "the workspace depends on efema-proto at another version than {version}: {dependency}"
-    );
+    // The workspace depends on its own crates at the versions they carry: a
+    // stale one publishes a crate that asks for its sibling's previous release.
+    let seal = manifest_field("crates/lacodda-seal/Cargo.toml", "[package]", "version");
+    let workspace = read("Cargo.toml");
+    for member in published() {
+        let expected = if member == "lacodda-seal" { &seal } else { &version };
+        let dependency = workspace
+            .lines()
+            .find(|line| line.starts_with(&format!("{member} = ")))
+            .unwrap_or_else(|| panic!("the workspace does not declare {member}"));
+        assert!(
+            dependency.contains(&format!("version = \"{expected}\"")),
+            "the workspace depends on {member} at another version than {expected}: {dependency}"
+        );
+    }
 }
 
 #[test]
@@ -141,7 +163,7 @@ fn the_docs_site_describes_the_product_as_the_manifest_does() {
 
 #[test]
 fn readme_is_shared_rather_than_duplicated() {
-    for member in members() {
+    for member in efema_crates() {
         let manifest = format!("crates/{member}/Cargo.toml");
         assert_eq!(
             manifest_field(&manifest, "[package]", "readme"),
@@ -153,20 +175,28 @@ fn readme_is_shared_rather_than_duplicated() {
             "crates/{member} has a README of its own"
         );
     }
+    // lacodda-seal is another product to its readers, with a README of its own.
+    assert_eq!(manifest_field("crates/lacodda-seal/Cargo.toml", "[package]", "readme"), "README.md");
 }
 
 #[test]
 fn readme_links_resolve_off_github() {
     // crates.io renders the same file with no repository to resolve a relative
     // path against: the banner becomes a broken image, the links 404.
-    for (number, line) in read("README.md").lines().enumerate() {
+    for readme in ["README.md", "crates/lacodda-seal/README.md"] {
+        links_are_absolute(readme);
+    }
+}
+
+fn links_are_absolute(readme: &str) {
+    for (number, line) in read(readme).lines().enumerate() {
         for marker in ["src=\"", "href=\"", "]("] {
             for target in line.split(marker).skip(1) {
                 let end = target.find(['"', ')']).unwrap_or(target.len());
                 let target = &target[..end];
                 assert!(
                     target.starts_with("https://") || target.starts_with('#'),
-                    "README line {}: `{target}` does not resolve on crates.io; use an absolute URL",
+                    "{readme} line {}: `{target}` does not resolve on crates.io; use an absolute URL",
                     number + 1
                 );
             }
@@ -299,14 +329,66 @@ fn the_documented_chain_is_the_implemented_one() {
 }
 
 #[test]
+fn the_documented_sealing_is_the_implemented_one() {
+    // Another implementation reads and writes these bytes from the page alone.
+    let page = read("docs/src/content/docs/concepts/sealing.md");
+    let seal = read("crates/lacodda-seal/src/lib.rs");
+    let envelope = read("crates/efema/src/envelope.rs");
+    for (domain, source) in [
+        ("lacodda-seal/v1/key-id", &seal),
+        ("lacodda-seal/v1/sealed", &seal),
+        ("lacodda-seal/v1/locked", &seal),
+        ("efema/entry/v1", &envelope),
+        ("efema/stream-key/v1", &envelope),
+    ] {
+        assert!(source.contains(&format!("b\"{domain}\"")), "the domain {domain} moved in the code");
+        assert!(page.contains(&format!("\"{domain}\"")), "the sealing page does not give the domain {domain}");
+    }
+    for (name, value) in [
+        ("SEALED_OVERHEAD", lacodda_seal::SEALED_OVERHEAD),
+        ("LOCKED_LEN", lacodda_seal::LOCKED_LEN),
+        ("ENTRY_OVERHEAD", efema::ENTRY_OVERHEAD),
+    ] {
+        assert!(
+            page.contains(&format!("<!-- {name} -->{value} bytes")),
+            "the sealing page does not state {name} as {value} bytes"
+        );
+    }
+    let default = lacodda_seal::KdfParams::DEFAULT;
+    let stated = format!(
+        "{} MiB, {} passes, {} lanes",
+        default.memory_kib() / 1024,
+        default.iterations(),
+        default.parallelism()
+    );
+    assert!(page.contains(&stated), "the sealing page does not give the default Argon2id parameters as {stated}");
+}
+
+#[test]
 fn every_crate_is_published_in_dependency_order() {
     let publish = read(".github/workflows/publish.yml");
     let line = publish.lines().find(|l| l.trim().starts_with("for crate in ")).expect("publish.yml loops over crates");
     let listed: Vec<&str> =
         line.trim().trim_start_matches("for crate in ").trim_end_matches("; do").split_whitespace().collect();
-    let mut expected: Vec<String> = members();
-    expected.sort_by_key(|m| m != "efema-proto");
-    assert_eq!(listed, expected, "publish.yml must publish every crate, efema-proto first");
+    // A crate comes after every crate it depends on: crates.io resolves
+    // dependencies when it accepts a package.
+    let order = ["efema-proto", "lacodda-seal", "efema-server", "efema"];
+    assert_eq!(listed, order, "publish.yml must publish every crate, each after what it depends on");
+    let mut crates = published();
+    crates.sort();
+    let mut expected: Vec<String> = order.iter().map(|c| c.to_string()).collect();
+    expected.sort();
+    assert_eq!(crates, expected, "a crate is published that the order above does not place");
+    for (index, member) in order.iter().enumerate() {
+        let manifest = read(format!("crates/{member}/Cargo.toml"));
+        let dependencies = manifest.split("[dev-dependencies]").next().unwrap_or_default();
+        for later in &order[index + 1..] {
+            assert!(
+                !dependencies.lines().any(|l| l.starts_with(&format!("{later}.workspace"))),
+                "{member} depends on {later}, which publish.yml publishes after it"
+            );
+        }
+    }
 }
 
 #[test]

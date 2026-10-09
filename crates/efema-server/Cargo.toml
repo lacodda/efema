@@ -34,6 +34,12 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+# Only for tests/release_consistency.rs, which holds the sealing page to the
+# formats the client and its sealing crate write. Path only: a dev-dependency
+# without a version is left out when the crate is published, so the relay
+# does not wait on crates.io for crates published after it.
+efema = { path = "../efema" }
+lacodda-seal = { path = "../lacodda-seal" }
 minicbor.workspace = true
 reqwest.workspace = true
 tempfile.workspace = true
