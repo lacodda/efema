@@ -276,9 +276,11 @@ async fn a_relay_that_lost_its_data_is_not_written_into() {
     let client = device.open(relay.transport(), "notes", 1).await;
     client.push([b"before"]).await.unwrap();
 
-    let dir = relay.stop().await;
-    std::fs::remove_dir_all(dir.path()).unwrap();
-    let relay = TestRelay::start_in(dir).await;
+    // Lost, as a relay whose disk was wiped: the same device meets a relay
+    // with an empty directory. (Deleting the old one instead races Windows,
+    // which can hold a file just closed for a moment longer.)
+    drop(relay.stop().await);
+    let relay = TestRelay::start().await;
     let client = device.open(relay.transport(), "notes", 1).await;
     assert!(matches!(client.push([b"after"]).await, Err(Error::StreamGone { .. })));
     assert!(matches!(client.pull().await, Err(Error::StreamGone { .. })));

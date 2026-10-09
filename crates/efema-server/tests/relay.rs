@@ -234,9 +234,11 @@ async fn a_writer_that_names_its_stream_writes_only_into_that_one() {
     // The relay loses its data and starts again: the name is free, then taken
     // by a new incarnation. A writer that knew the old one is refused both
     // times, and its batch never becomes the start of someone else's stream.
-    let dir = relay.stop().await;
-    std::fs::remove_dir_all(dir.path()).unwrap();
-    relay = TestRelay::start_in(dir).await;
+    // An empty directory stands for the lost one. (Deleting the old one
+    // instead races Windows, which can hold a file just closed for a moment
+    // longer.)
+    drop(relay.stop().await);
+    relay = TestRelay::start().await;
     let refused = relay.write_to("notes", first.stream, 1, &[b"c"]).await.unwrap_err();
     assert_eq!((refused.status, refused.problem.code), (StatusCode::NOT_FOUND, ProblemCode::StreamNotFound));
     assert_eq!(relay.read("notes", None, None).await.unwrap_err().problem.code, ProblemCode::StreamNotFound);
