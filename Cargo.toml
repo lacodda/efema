@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/efema-proto", "crates/efema-server"]
+members = ["crates/efema-proto", "crates/efema-server", "crates/lacodda-seal"]
 resolver = "3"
 
 [workspace.package]
@@ -14,12 +14,20 @@ homepage = "https://lacodda.github.io/efema/"
 
 [workspace.dependencies]
 efema-proto = { path = "crates/efema-proto", version = "0.1.0" }
+lacodda-seal = { path = "crates/lacodda-seal", version = "0.1.0" }
 
 # The wire format: CBOR with integer keys, decoded strictly. Derives keep each
 # message one definition; unknown keys are skipped, so a field added later does
 # not break an older peer.
 minicbor = { version = "2", features = ["alloc", "derive"] }
 sha2 = "0.11"
+
+# Sealing (lacodda-seal): the same audited RustCrypto primitives sefy's vaults
+# use. Default features off - argon2's password-hash string format and the
+# AEAD's own nonce source are not used; nonces and salts come from getrandom.
+argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
+zeroize = "1"
 
 anyhow = "1"
 # HTTP/1.1 only: TLS and HTTP/2 belong to the reverse proxy in front (the
@@ -40,6 +48,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # Tests talk to the relay over a real socket, the way a client does.
 reqwest = { version = "0.13", default-features = false }
 tempfile = "3"
+
+# Argon2id is meant to be expensive, and an unoptimized build makes it about
+# ten times more so: tests that unlock keys would spend minutes on it. Only
+# the hashing crates are optimized; everything else keeps a debug build.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
 
 # A release binary is downloaded far more often than it is built. Link-time
 # optimization across one codegen unit and a stripped symbol table roughly

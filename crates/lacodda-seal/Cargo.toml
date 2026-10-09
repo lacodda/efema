@@ -1,0 +1,25 @@
+[package]
+name = "lacodda-seal"
+# Its own version, not the workspace's: the formats here are a contract that
+# outlives any one efema release, and a crate that did not change must not
+# make its users move (docs/adr/0008-lacodda-seal-in-this-workspace.md).
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Seal bytes under a key, and lock that key under a passphrase - two small versioned formats over Argon2id and XChaCha20-Poly1305"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage = "https://lacodda.github.io/efema/concepts/sealing/"
+documentation = "https://docs.rs/lacodda-seal"
+readme = "README.md"
+keywords = ["encryption", "aead", "argon2", "xchacha20poly1305", "passphrase"]
+categories = ["cryptography"]
+
+[dependencies]
+argon2.workspace = true
+chacha20poly1305.workspace = true
+getrandom.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
