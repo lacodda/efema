@@ -1,0 +1,25 @@
+[package]
+name = "mini-vault"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "An example consumer of efema: a folder of files kept in sync between devices through a relay"
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "mini-vault"
+path = "src/main.rs"
+
+[dependencies]
+efema.workspace = true
+
+anyhow.workspace = true
+clap.workspace = true
+minicbor.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+efema-server.workspace = true
+tempfile.workspace = true
