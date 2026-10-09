@@ -27,6 +27,7 @@ written in format 2; streams written by 0.2 are not read.
 ### Testing
 
 - Show that the relay keeps and logs nothing readable
+- Start an empty relay rather than delete a directory Windows holds
 
 
 ## [0.2.0] - 2026-10-09
