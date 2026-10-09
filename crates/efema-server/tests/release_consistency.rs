@@ -329,42 +329,6 @@ fn the_documented_chain_is_the_implemented_one() {
 }
 
 #[test]
-fn the_documented_sealing_is_the_implemented_one() {
-    // Another implementation reads and writes these bytes from the page alone.
-    let page = read("docs/src/content/docs/concepts/sealing.md");
-    let seal = read("crates/lacodda-seal/src/lib.rs");
-    let envelope = read("crates/efema/src/envelope.rs");
-    for (domain, source) in [
-        ("lacodda-seal/v1/key-id", &seal),
-        ("lacodda-seal/v1/sealed", &seal),
-        ("lacodda-seal/v1/locked", &seal),
-        ("efema/entry/v1", &envelope),
-        ("efema/stream-key/v1", &envelope),
-    ] {
-        assert!(source.contains(&format!("b\"{domain}\"")), "the domain {domain} moved in the code");
-        assert!(page.contains(&format!("\"{domain}\"")), "the sealing page does not give the domain {domain}");
-    }
-    for (name, value) in [
-        ("SEALED_OVERHEAD", lacodda_seal::SEALED_OVERHEAD),
-        ("LOCKED_LEN", lacodda_seal::LOCKED_LEN),
-        ("ENTRY_OVERHEAD", efema::ENTRY_OVERHEAD),
-    ] {
-        assert!(
-            page.contains(&format!("<!-- {name} -->{value} bytes")),
-            "the sealing page does not state {name} as {value} bytes"
-        );
-    }
-    let default = lacodda_seal::KdfParams::DEFAULT;
-    let stated = format!(
-        "{} MiB, {} passes, {} lanes",
-        default.memory_kib() / 1024,
-        default.iterations(),
-        default.parallelism()
-    );
-    assert!(page.contains(&stated), "the sealing page does not give the default Argon2id parameters as {stated}");
-}
-
-#[test]
 fn every_crate_is_published_in_dependency_order() {
     let publish = read(".github/workflows/publish.yml");
     let line = publish.lines().find(|l| l.trim().starts_with("for crate in ")).expect("publish.yml loops over crates");

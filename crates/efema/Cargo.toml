@@ -25,8 +25,8 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
-# Path only: a dev-dependency without a version is left out when the crate
-# is published, so the client does not wait for the relay on crates.io.
-efema-server = { path = "../efema-server" }
+# Tests talk to a real relay. Published before this crate (publish.yml), so
+# the version this names is on crates.io when the client goes up.
+efema-server.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
