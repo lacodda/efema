@@ -1,6 +1,6 @@
 # ADR 0009: One random key per stream, locked under the passphrase, kept in the stream
 
-- Status: accepted
+- Status: accepted; the entry layout amended by [ADR 0011](0011-compressed-before-sealed.md), the lock entry by [ADR 0012](0012-a-changed-passphrase-is-a-new-lock.md)
 - Date: 2026-10-09
 
 ## Context

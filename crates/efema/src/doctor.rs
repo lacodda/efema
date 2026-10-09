@@ -44,6 +44,8 @@ pub struct KeyReport {
     pub params: KdfParams,
     /// When it was locked under the passphrase it has now.
     pub locked_at: SystemTime,
+    /// How many times the passphrase has been changed.
+    pub changes: u32,
 }
 
 /// The stream as the relay has it.
@@ -83,7 +85,7 @@ impl Report {
         }
         if self.key.params.memory_kib() < KdfParams::DEFAULT.memory_kib() {
             problems.push(format!(
-                "the key is locked with {}, weaker than today's default {}",
+                "the key is locked with {}, weaker than today's default {}: changing the passphrase locks it again",
                 self.key.params,
                 KdfParams::DEFAULT
             ));
@@ -117,8 +119,13 @@ impl fmt::Display for Report {
             (Ok(cursor), None) => format!("at {}", cursor.seq),
             (Err(_), _) => "unknown".to_string(),
         };
-        let key =
+        let mut key =
             format!("{} - locked {}, {}", self.key.id, when(self.key.locked_at, SystemTime::now()), self.key.params);
+        match self.key.changes {
+            0 => {}
+            1 => key.push_str(", passphrase changed once"),
+            n => key.push_str(&format!(", passphrase changed {n} times")),
+        }
 
         writeln!(f, "relay    {relay}")?;
         writeln!(f, "stream   {stream}")?;
@@ -148,6 +155,7 @@ impl<T: Transport> Client<T> {
             Err(e) => Err(e.clone()),
         };
         let lock = self.locked_key();
+        let changes = self.passphrase_changes();
         Report {
             transport: self.transport().describe(),
             stream: self.stream().clone(),
@@ -155,7 +163,7 @@ impl<T: Transport> Client<T> {
             device: self.device(),
             epoch: self.epoch(),
             cursor,
-            key: KeyReport { id: lock.key_id(), params: lock.params(), locked_at: lock.locked_at() },
+            key: KeyReport { id: lock.key_id(), params: lock.params(), locked_at: lock.locked_at(), changes },
             relay,
         }
     }

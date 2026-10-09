@@ -4,7 +4,8 @@
 //!
 //! One SQLite file per device. The key is kept only locked - under the
 //! passphrase, as the relay keeps it - so the file opens nothing on its own,
-//! and a device can unlock its key without the network.
+//! and a device can unlock its key without the network. When the passphrase
+//! changes, the device keeps the newest lock it has read.
 
 use std::fmt;
 use std::fs::{File, TryLockError};
@@ -18,11 +19,12 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::Error;
 
 /// The schema version this release writes and reads (`PRAGMA user_version`).
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// Migrations, in order: index `i` takes the file from version `i` to
 /// `i + 1`. An applied migration is never edited - a change is a new one.
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE device (
     only       INTEGER PRIMARY KEY CHECK (only = 1),
     id         BLOB    NOT NULL CHECK (length(id) = 16),
@@ -37,7 +39,13 @@ CREATE TABLE streams (
     hash       BLOB    NOT NULL CHECK (length(hash) = 32),
     updated_at INTEGER NOT NULL
 ) STRICT;
-"#];
+"#,
+    r#"
+-- Which change of passphrase the lock is from: 0 for the lock the stream was
+-- created with. A device only ever moves to a newer one.
+ALTER TABLE streams ADD COLUMN generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0);
+"#,
+];
 
 /// Which device this is: sixteen random bytes drawn the first time its state
 /// is opened.
@@ -106,6 +114,8 @@ pub(crate) struct Known {
     pub(crate) stream: StreamId,
     /// The stream's key, locked under the passphrase.
     pub(crate) lock: Vec<u8>,
+    /// The lock's generation.
+    pub(crate) generation: u32,
     /// How far the device has read and acknowledged.
     pub(crate) cursor: Cursor,
 }
@@ -193,31 +203,52 @@ impl State {
 
     pub(crate) fn known(&self, stream: &StreamName) -> Result<Option<Known>, Error> {
         self.conn()
-            .query_row("SELECT stream, lock, seq, hash FROM streams WHERE name = ?1", [stream.as_str()], |row| {
-                let id = StreamId::from_bytes(blob(row.get(0)?)?);
-                let seq: i64 = row.get(2)?;
-                Ok(Known {
-                    stream: id,
-                    lock: row.get(1)?,
-                    cursor: Cursor {
+            .query_row(
+                "SELECT stream, lock, seq, hash, generation FROM streams WHERE name = ?1",
+                [stream.as_str()],
+                |row| {
+                    let id = StreamId::from_bytes(blob(row.get(0)?)?);
+                    let seq: i64 = row.get(2)?;
+                    let generation: i64 = row.get(4)?;
+                    Ok(Known {
                         stream: id,
-                        seq: u64::try_from(seq).expect("the schema keeps positions non-negative"),
-                        hash: Hash::from_bytes(blob(row.get(3)?)?),
-                    },
-                })
-            })
+                        lock: row.get(1)?,
+                        generation: u32::try_from(generation).expect("generations are written from a u32"),
+                        cursor: Cursor {
+                            stream: id,
+                            seq: u64::try_from(seq).expect("the schema keeps positions non-negative"),
+                            hash: Hash::from_bytes(blob(row.get(3)?)?),
+                        },
+                    })
+                },
+            )
             .optional()
             .map_err(|source| self.error(source))
     }
 
     /// Records the incarnation and the key of a stream this device has just
     /// joined, with its cursor before the first entry.
-    pub(crate) fn join(&self, stream: &StreamName, id: StreamId, lock: &[u8]) -> Result<(), Error> {
+    pub(crate) fn join(&self, stream: &StreamName, id: StreamId, lock: &[u8], generation: u32) -> Result<(), Error> {
         let start = Cursor::start(id);
         self.conn()
             .execute(
-                "INSERT INTO streams (name, stream, lock, seq, hash, updated_at) VALUES (?1, ?2, ?3, 0, ?4, ?5)",
-                params![stream.as_str(), id.as_bytes(), lock, start.hash.as_bytes(), unix_now()],
+                "INSERT INTO streams (name, stream, lock, generation, seq, hash, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)",
+                params![stream.as_str(), id.as_bytes(), lock, generation, start.hash.as_bytes(), unix_now()],
+            )
+            .map(drop)
+            .map_err(|source| self.error(source))
+    }
+
+    /// Keeps a newer lock of the stream's key. A lock of an older generation,
+    /// or of another incarnation, changes nothing: entries read again after a
+    /// restart never take the device back to a passphrase it moved on from.
+    pub(crate) fn relock(&self, stream: &StreamName, id: StreamId, lock: &[u8], generation: u32) -> Result<(), Error> {
+        self.conn()
+            .execute(
+                "UPDATE streams SET lock = ?1, generation = ?2, updated_at = ?3
+                 WHERE name = ?4 AND stream = ?5 AND generation < ?2",
+                params![lock, generation, unix_now(), stream.as_str(), id.as_bytes()],
             )
             .map(drop)
             .map_err(|source| self.error(source))
@@ -323,7 +354,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = State::open(dir.path().join("sync.sqlite3")).unwrap();
         let id = StreamId::from_bytes([3; 16]);
-        state.join(&name("s"), id, b"lock").unwrap();
+        state.join(&name("s"), id, b"lock", 0).unwrap();
         let at = |seq| Cursor { stream: id, seq, hash: Hash::from_bytes([seq as u8; 32]) };
 
         state.advance(&name("s"), &at(5)).unwrap();
@@ -336,6 +367,48 @@ mod tests {
 
         state.forget(&name("s")).unwrap();
         assert!(state.known(&name("s")).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_lock_only_moves_to_a_newer_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = State::open(dir.path().join("sync.sqlite3")).unwrap();
+        let id = StreamId::from_bytes([3; 16]);
+        state.join(&name("s"), id, b"first", 0).unwrap();
+        let lock = || {
+            let known = state.known(&name("s")).unwrap().unwrap();
+            (known.lock, known.generation)
+        };
+
+        state.relock(&name("s"), id, b"second", 2).unwrap();
+        assert_eq!(lock(), (b"second".to_vec(), 2));
+        for generation in [1, 2] {
+            state.relock(&name("s"), id, b"replayed", generation).unwrap();
+            assert_eq!(lock(), (b"second".to_vec(), 2), "generation {generation} moved the lock back");
+        }
+        state.relock(&name("s"), StreamId::from_bytes([4; 16]), b"foreign", 9).unwrap();
+        assert_eq!(lock(), (b"second".to_vec(), 2), "a lock of another incarnation");
+    }
+
+    #[test]
+    fn a_state_of_the_previous_release_is_carried_forward() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sync.sqlite3");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            conn.execute("INSERT INTO device (only, id, created_at) VALUES (1, zeroblob(16), 0)", []).unwrap();
+            conn.execute(
+                "INSERT INTO streams (name, stream, lock, seq, hash, updated_at)
+                 VALUES ('s', zeroblob(16), x'4c', 4, zeroblob(32), 0)",
+                [],
+            )
+            .unwrap();
+        }
+        let state = State::open(&path).unwrap();
+        let known = state.known(&name("s")).unwrap().unwrap();
+        assert_eq!((known.lock, known.generation, known.cursor.seq), (b"L".to_vec(), 0, 4));
     }
 
     #[test]

@@ -31,6 +31,13 @@ argon2 = { version = "0.6", default-features = false, features = ["alloc", "zero
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
 zeroize = "1"
 
+# Entries are compressed before they are sealed (ciphertext does not
+# compress). The binding to the reference library: every consumer builds with
+# a C toolchain anyway, and the frame format is the standard one another
+# language reads with its own zstd. Default features off - the legacy formats
+# and the dictionary builder are not used.
+zstd = { version = "0.14", default-features = false }
+
 anyhow = "1"
 # HTTP/1.1 only: TLS and HTTP/2 belong to the reverse proxy in front (the
 # relay never terminates TLS itself), and HTTP/1.1 is what that proxy speaks to

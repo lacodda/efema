@@ -33,6 +33,7 @@ fn the_sealing_page_gives_the_formats_the_code_writes() {
         ("lacodda-seal/v1/locked", &seal),
         ("efema/entry/v1", &envelope),
         ("efema/stream-key/v1", &envelope),
+        ("efema/key-entry/v1", &envelope),
     ] {
         assert!(source.contains(&format!("b\"{domain}\"")), "the domain {domain} moved in the code");
         assert!(page.contains(&format!("\"{domain}\"")), "the sealing page does not give the domain {domain}");
@@ -41,12 +42,24 @@ fn the_sealing_page_gives_the_formats_the_code_writes() {
         ("SEALED_OVERHEAD", lacodda_seal::SEALED_OVERHEAD),
         ("LOCKED_LEN", lacodda_seal::LOCKED_LEN),
         ("ENTRY_OVERHEAD", efema::ENTRY_OVERHEAD),
+        // A lock, then the key's seal over four bytes of generation.
+        ("KEY_ENTRY_LEN", lacodda_seal::LOCKED_LEN + lacodda_seal::SEALED_OVERHEAD + 4),
     ] {
         assert!(
             page.contains(&format!("<!-- {name} -->{value} bytes")),
             "the sealing page does not state {name} as {value} bytes"
         );
     }
+    for (code, page_says) in [
+        ("const FORMAT: u8 = 2;", "format: u8 (2)"),
+        ("const CODEC_NONE: u8 = 0;", "| `0` | the item"),
+        ("const CODEC_ZSTD: u8 = 1;", "| `1` | one [zstd]"),
+        ("const MAX_EXPANDED: usize = limits::MAX_BODY_BYTES;", "at most 16 MiB"),
+    ] {
+        assert!(envelope.contains(code), "`{code}` moved in the code");
+        assert!(page.contains(page_says), "the sealing page does not say `{page_says}`");
+    }
+    assert_eq!(efema::Limits::V1.max_body, 16 * 1024 * 1024, "the page gives the expansion bound as 16 MiB");
     let default = lacodda_seal::KdfParams::DEFAULT;
     let stated = format!(
         "{} MiB, {} passes, {} lanes",

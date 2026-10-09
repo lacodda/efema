@@ -3,18 +3,20 @@
 
 #![allow(dead_code)]
 
+use std::io::Write;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use efema::wire::{Batch, Heads, Page, Watch, Written};
 use efema::{Client, Cursor, Epoch, Limits, Relay, Secret, State, StreamName, Transport, TransportError};
 use tempfile::TempDir;
-use tokio::sync::oneshot;
+use tokio::sync::{Barrier, oneshot};
 use tokio::task::JoinHandle;
 
 pub const PASSPHRASE: &[u8] = b"correct horse battery staple";
+pub const NEW_PASSPHRASE: &[u8] = b"a longer and a better passphrase";
 
 pub struct TestRelay {
     pub url: String,
@@ -130,6 +132,36 @@ pub fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|window| window == needle)
 }
 
+/// Everything logged in this test process from the first call on, at every
+/// level - the relay's log and the client's.
+pub fn log() -> Arc<Mutex<Vec<u8>>> {
+    static LOG: OnceLock<Arc<Mutex<Vec<u8>>>> = OnceLock::new();
+    LOG.get_or_init(|| {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let sink = buffer.clone();
+        tracing_subscriber::fmt()
+            .with_max_level(tracing_subscriber::filter::LevelFilter::TRACE)
+            .with_ansi(false)
+            .with_writer(move || Sink(sink.clone()))
+            .init();
+        buffer
+    })
+    .clone()
+}
+
+struct Sink(Arc<Mutex<Vec<u8>>>);
+
+impl Write for Sink {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// What a man in the middle does to a page on its way to the client, given
 /// the cursor the page was read after.
 pub type Tamper = dyn Fn(Option<&Cursor>, &mut Page) + Send + Sync;
@@ -142,11 +174,14 @@ pub struct Between {
     pub limits: Limits,
     pub tamper: Option<Arc<Tamper>>,
     pub appends: Arc<AtomicUsize>,
+    /// Holds each append until every transport sharing it has one waiting:
+    /// two devices writing at the same moment, on purpose.
+    pub together: Option<Arc<Barrier>>,
 }
 
 impl Between {
     pub fn new(relay: Relay) -> Self {
-        Self { relay, limits: Limits::V1, tamper: None, appends: Arc::default() }
+        Self { relay, limits: Limits::V1, tamper: None, appends: Arc::default(), together: None }
     }
 }
 
@@ -161,6 +196,9 @@ impl Transport for Between {
 
     async fn append(&self, stream: &StreamName, batch: &Batch) -> Result<Written, TransportError> {
         self.appends.fetch_add(1, Ordering::SeqCst);
+        if let Some(together) = &self.together {
+            together.wait().await;
+        }
         self.relay.append(stream, batch).await
     }
 

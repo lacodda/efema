@@ -10,8 +10,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use common::{Between, Device, PASSPHRASE, TestRelay, contains, data, drain, name, relay_bytes};
-use efema::{Epoch, Error, Key, Limits, Secret, Transport, chain};
+use common::{Between, Device, NEW_PASSPHRASE, PASSPHRASE, TestRelay, contains, data, drain, name, relay_bytes};
+use efema::{Compression, ENTRY_OVERHEAD, Epoch, Error, Key, Limits, Secret, Transport, chain};
+use tokio::sync::Barrier;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn two_devices_sync_through_the_relay() {
@@ -35,24 +36,66 @@ async fn two_devices_sync_through_the_relay() {
     assert_eq!(received[2].device, phone.state.device());
 }
 
+/// The relay cannot read what it keeps - shown, not claimed: every way a
+/// client writes goes through a real relay, and then its database, its
+/// write-ahead log and everything logged in the process at every level are
+/// searched for what the relay must never have.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_relay_keeps_only_ciphertext() {
+async fn nothing_the_relay_keeps_or_logs_is_plaintext() {
+    let log = common::log();
     let relay = TestRelay::start().await;
-    let device = Device::new();
-    let client = device.open(relay.transport(), "notes", 1).await;
+    let (laptop, phone) = (Device::new(), Device::new());
+    // Compression off: what hides the marker has to be the seal, not zstd.
+    let on_laptop = laptop.open(relay.transport(), "notes", 1).await.with_compression(Compression::Off);
     let marker = b"PLAINTEXT-MARKER-the-relay-must-never-see";
-    client.push([marker.as_slice(), marker.as_slice()]).await.unwrap();
+    on_laptop.push([marker.as_slice(), marker.as_slice()]).await.unwrap();
+    let mut long = marker.repeat(100);
+    long.extend_from_slice(b"and a tail that does not repeat");
+    on_laptop.push([&long]).await.unwrap();
+    on_laptop.with_compression(Compression::Zstd).push([&long]).await.unwrap();
+    let on_laptop = laptop.try_open(relay.transport(), "notes", 1, Secret::Passphrase(PASSPHRASE)).await.unwrap();
+    on_laptop.change_passphrase(NEW_PASSPHRASE).await.unwrap();
 
-    let stored = relay_bytes(relay.dir.path());
-    assert!(stored.len() > marker.len(), "the relay's files were not found");
-    assert!(!contains(&stored, marker), "the relay stored an item in the clear");
-    assert!(!contains(&stored, PASSPHRASE), "the relay stored the passphrase");
-    assert!(!contains(&stored, client.key().to_bytes().as_slice()), "the relay stored the key");
-    assert!(!contains(&stored, device.state.device().as_bytes()), "the relay can see which device wrote");
+    let on_phone = phone.try_open(relay.transport(), "notes", 1, Secret::Passphrase(NEW_PASSPHRASE)).await.unwrap();
+    assert_eq!(drain(&on_phone).await.len(), 4);
+    on_phone.push([marker]).await.unwrap();
+    assert!(on_laptop.wait(Duration::from_secs(5)).await.unwrap());
+    drain(&on_laptop).await;
 
-    // Nor does the device's own state hold the key in the clear: only locked.
-    let state = std::fs::read(device.state.path()).unwrap();
-    assert!(!contains(&state, client.key().to_bytes().as_slice()), "the state file holds the key unlocked");
+    let key = on_laptop.key().to_bytes();
+    let hex_key: String = key.iter().map(|b| format!("{b:02x}")).collect();
+    let devices = [laptop.state.device(), phone.state.device()];
+    let dir = relay.stop().await;
+    let stored = relay_bytes(dir.path());
+    assert!(stored.len() > long.len(), "the relay's files were not found");
+    let secrets: [(&str, &[u8]); 4] = [
+        ("an item", marker),
+        ("the passphrase", PASSPHRASE),
+        ("the new passphrase", NEW_PASSPHRASE),
+        ("the key", key.as_slice()),
+    ];
+    for (what, secret) in secrets {
+        assert!(!contains(&stored, secret), "the relay stored {what} in the clear");
+    }
+    for device in devices {
+        assert!(!contains(&stored, device.as_bytes()), "the relay can see which device wrote");
+    }
+
+    let log = log.lock().unwrap().clone();
+    assert!(contains(&log, b"notes: wrote"), "the relay's log was not captured");
+    for (what, secret) in secrets.into_iter().chain([("the key in hex", hex_key.as_bytes())]) {
+        assert!(!contains(&log, secret), "{what} was logged");
+    }
+
+    // Nor does a device's own state hold the key or the passphrase: only the
+    // key, locked.
+    for device in [&laptop, &phone] {
+        let state = relay_bytes(device.dir.path());
+        assert!(state.len() > 1000, "the state files were not found");
+        for (what, secret) in secrets {
+            assert!(!contains(&state, secret), "the state holds {what}");
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -355,6 +398,180 @@ async fn an_entry_no_client_wrote_is_refused_not_skipped() {
     relay.transport().append(&name("plain"), &plain).await.unwrap();
     let refused = Device::new().try_open(relay.transport(), "plain", 1, Secret::Passphrase(PASSPHRASE)).await;
     assert!(matches!(refused, Err(Error::ForeignEntry { seq: 1, .. })), "{refused:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_changed_passphrase_holds_on_every_device() {
+    let relay = TestRelay::start().await;
+    let (laptop, phone) = (Device::new(), Device::new());
+    let on_laptop = laptop.open(relay.transport(), "notes", 1).await;
+    let on_phone = phone.open(relay.transport(), "notes", 1).await;
+    on_laptop.push([b"before".as_slice(), b"the change"]).await.unwrap();
+    let key = on_laptop.key().id();
+
+    on_laptop.change_passphrase(NEW_PASSPHRASE).await.unwrap();
+    assert_eq!(on_laptop.passphrase_changes(), 1);
+    on_laptop.push([b"after"]).await.unwrap();
+
+    // Nothing was sealed again: the stream is its key, two items, the new
+    // lock and one more item - and every entry opens under the same key.
+    let page = relay.transport().read(&name("notes"), None, 100).await.unwrap();
+    assert_eq!(page.head, 5);
+    assert!(lacodda_seal::is_locked_key(&page.entries[3].data));
+
+    // The phone takes the new lock in as it reads past it, and from its next
+    // start the old passphrase no longer opens the stream there.
+    assert_eq!(data(&drain(&on_phone).await), [b"before".as_slice(), b"the change", b"after"]);
+    assert_eq!((on_phone.passphrase_changes(), on_phone.locked_key()), (1, on_laptop.locked_key()));
+    assert!(on_phone.doctor().await.to_string().contains("passphrase changed once"));
+    drop(on_phone);
+    let phone = phone.restart();
+    let old = phone.try_open(relay.transport(), "notes", 1, Secret::Passphrase(PASSPHRASE)).await;
+    assert!(matches!(old, Err(Error::WrongPassphrase { .. })), "{old:?}");
+    let on_phone = phone.try_open(relay.transport(), "notes", 1, Secret::Passphrase(NEW_PASSPHRASE)).await.unwrap();
+    assert_eq!(on_phone.key().id(), key);
+
+    // So does the laptop, which made the change.
+    drop(on_laptop);
+    let laptop = laptop.restart();
+    let old = laptop.try_open(relay.transport(), "notes", 1, Secret::Passphrase(PASSPHRASE)).await;
+    assert!(matches!(old, Err(Error::WrongPassphrase { .. })), "{old:?}");
+    laptop.try_open(relay.transport(), "notes", 1, Secret::Passphrase(NEW_PASSPHRASE)).await.unwrap();
+
+    // A device that joins now opens with the new passphrase, and reads
+    // everything, the entries sealed before the change included.
+    let tablet = Device::new();
+    let on_tablet = tablet.try_open(relay.transport(), "notes", 1, Secret::Passphrase(NEW_PASSPHRASE)).await.unwrap();
+    assert_eq!((on_tablet.key().id(), on_tablet.passphrase_changes()), (key, 1));
+    assert_eq!(data(&drain(&on_tablet).await), [b"before".as_slice(), b"the change", b"after"]);
+    let wrong = Device::new().try_open(relay.transport(), "notes", 1, Secret::Passphrase(b"neither")).await;
+    assert!(matches!(wrong, Err(Error::WrongPassphrase { .. })), "{wrong:?}");
+
+    // The old passphrase is not revoked - its lock is in the stream for good
+    // - but a device that joins with it moves to the new lock as it reads,
+    // like everyone else.
+    let late = Device::new();
+    let on_late = late.try_open(relay.transport(), "notes", 1, Secret::Passphrase(PASSPHRASE)).await.unwrap();
+    drain(&on_late).await;
+    assert_eq!(on_late.passphrase_changes(), 1);
+    drop(on_late);
+    let late = late.restart();
+    let old = late.try_open(relay.transport(), "notes", 1, Secret::Passphrase(PASSPHRASE)).await;
+    assert!(matches!(old, Err(Error::WrongPassphrase { .. })), "{old:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lock_the_key_did_not_seal_moves_nothing() {
+    let relay = TestRelay::start().await;
+    let device = Device::new();
+    let client = device.open(relay.transport(), "notes", 1).await;
+    client.change_passphrase(NEW_PASSPHRASE).await.unwrap();
+    let page = relay.transport().read(&name("notes"), None, 10).await.unwrap();
+    let (first, changed) = (page.entries[0].data.clone(), page.entries[1].data.clone());
+
+    // The relay - or anyone who can write to it - hands the stream's first
+    // lock in again: a real entry of the key, from an older generation. It
+    // does not take the stream back to the old passphrase.
+    let write = |entry: Vec<u8>| efema::wire::Batch { epoch: Epoch(1), entries: vec![entry], stream: None };
+    relay.transport().append(&name("notes"), &write(first)).await.unwrap();
+    let reader = Device::new();
+    let on_reader = reader.try_open(relay.transport(), "notes", 1, Secret::Passphrase(NEW_PASSPHRASE)).await.unwrap();
+    drain(&on_reader).await;
+    drain(&client).await;
+    assert_eq!(on_reader.passphrase_changes(), 1);
+    assert_eq!(client.locked_key().to_bytes(), changed[..lacodda_seal::LOCKED_LEN]);
+
+    // A lock of the key under a seal that is not the key's: refused, as an
+    // altered entry is, rather than taken in.
+    let mut forged = changed.clone();
+    let last = forged.len() - 1;
+    forged[last] ^= 1;
+    relay.transport().append(&name("notes"), &write(forged)).await.unwrap();
+    let refused = client.pull().await.unwrap_err();
+    assert!(matches!(refused, Error::Inauthentic { seq: 4, .. }), "{refused:?}");
+    assert_eq!(client.passphrase_changes(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_changes_at_once_agree_on_one_passphrase() {
+    let relay = TestRelay::start().await;
+    let (a, b) = (Device::new(), Device::new());
+    let together = Arc::new(Barrier::new(2));
+    let through = |together: &Arc<Barrier>| {
+        let mut between = Between::new(relay.transport());
+        between.together = Some(together.clone());
+        between
+    };
+    a.open(relay.transport(), "notes", 1).await;
+    b.open(relay.transport(), "notes", 1).await;
+    // A device that reads both changes later, in one page.
+    let e = Device::new();
+    let on_e = e.open(relay.transport(), "notes", 1).await;
+    // Opened again through transports that hold each append for the other.
+    let on_a = a.try_open(through(&together), "notes", 1, Secret::Passphrase(PASSPHRASE)).await.unwrap();
+    let on_b = b.try_open(through(&together), "notes", 1, Secret::Passphrase(PASSPHRASE)).await.unwrap();
+
+    let (from_a, from_b) =
+        tokio::join!(on_a.change_passphrase(b"set on a, at once"), on_b.change_passphrase(b"set on b, at once"));
+    let lost = [&from_a, &from_b].iter().filter(|r| matches!(r, Err(Error::PassphraseRace { .. }))).count();
+    assert_eq!((from_a.is_ok() || from_b.is_ok(), lost), (true, 1), "{from_a:?} {from_b:?}");
+    assert_eq!(on_a.locked_key(), on_b.locked_key(), "the two devices hold different locks");
+    assert_eq!((on_a.passphrase_changes(), on_b.passphrase_changes()), (1, 1));
+    drain(&on_e).await;
+    assert_eq!((on_e.locked_key(), on_e.passphrase_changes()), (on_a.locked_key(), 1));
+
+    // A third device reads both changes, and takes the one that held.
+    let c = Device::new();
+    let held = if from_a.is_ok() { b"set on a, at once".as_slice() } else { b"set on b, at once" };
+    let on_c = c.try_open(relay.transport(), "notes", 1, Secret::Passphrase(held)).await.unwrap();
+    drain(&on_c).await;
+    assert_eq!(on_c.locked_key(), on_a.locked_key());
+
+    // The passphrase of the change that lost still opens - that lock is the
+    // key's too - and the device keeps the lock that held, as the others do.
+    let d = Device::new();
+    let lost = if from_a.is_ok() { b"set on b, at once".as_slice() } else { b"set on a, at once" };
+    let on_d = d.try_open(relay.transport(), "notes", 1, Secret::Passphrase(lost)).await.unwrap();
+    assert_eq!((on_d.locked_key(), on_d.passphrase_changes()), (on_a.locked_key(), 1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_behind_changes_the_passphrase_after_the_newest() {
+    let relay = TestRelay::start().await;
+    let (a, b, late) = (Device::new(), Device::new(), Device::new());
+    let on_a = a.open(relay.transport(), "notes", 1).await;
+    let on_b = b.open(relay.transport(), "notes", 1).await;
+    on_a.change_passphrase(NEW_PASSPHRASE).await.unwrap();
+
+    // The second device has not read the first change; its own still comes
+    // after it, rather than losing to it.
+    let third = b"a third passphrase, set from behind";
+    on_b.change_passphrase(third).await.unwrap();
+    assert_eq!(on_b.passphrase_changes(), 2);
+    drain(&on_a).await;
+    assert_eq!(on_a.locked_key(), on_b.locked_key());
+    let on_late = late.try_open(relay.transport(), "notes", 1, Secret::Passphrase(third)).await.unwrap();
+    assert_eq!(on_late.passphrase_changes(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_compresses_travels_compressed() {
+    let relay = TestRelay::start().await;
+    let (writer, reader) = (Device::new(), Device::new());
+    let on_writer = writer.open(relay.transport(), "notes", 1).await;
+    assert_eq!(on_writer.compression(), Compression::Zstd);
+    let text = "- [ ] a task in a markdown note, much like the one before it\n".repeat(500).into_bytes();
+    on_writer.push([&text]).await.unwrap();
+    let plain = on_writer.with_compression(Compression::Off);
+    plain.push([&text]).await.unwrap();
+
+    let page = relay.transport().read(&name("notes"), None, 10).await.unwrap();
+    let sizes: Vec<usize> = page.entries[1..].iter().map(|e| e.data.len()).collect();
+    assert!(sizes[0] < text.len() / 3, "{} bytes of text went as {}", text.len(), sizes[0]);
+    assert_eq!(sizes[1], text.len() + ENTRY_OVERHEAD, "compression off still compressed");
+
+    let on_reader = reader.open(relay.transport(), "notes", 1).await;
+    assert_eq!(data(&drain(&on_reader).await), [text.as_slice(), &text]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

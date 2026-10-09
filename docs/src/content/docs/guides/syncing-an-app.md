@@ -1,6 +1,6 @@
 ---
 title: Syncing an app
-description: Use the efema client library in a Rust app - open a stream, push changes, pull and acknowledge, wait for news, and handle what can go wrong.
+description: Use the efema client library in a Rust app - open a stream, push changes, pull and acknowledge, wait for news, change the passphrase, and handle what can go wrong.
 ---
 
 The [`efema`](https://docs.rs/efema) crate is what an app links to. It seals
@@ -56,11 +56,35 @@ let pushed = notes.push([change_a.as_slice(), change_b.as_slice()]).await?;
 // pushed.positions: where each one landed, in order
 ```
 
-Each item is sealed and appended. Items that fit in one request land as one
-batch: on consecutive positions, all or none. A push larger than that is cut
-into batches that each fit; if one fails partway, `Error::Interrupted` says
-how many items made it. An item too large for a request of its own is refused
-before anything is sent - `notes.max_item_len()` says the limit.
+Each item is compressed, sealed and appended. Items that fit in one request
+land as one batch: on consecutive positions, all or none. A push larger than
+that is cut into batches that each fit; if one fails partway,
+`Error::Interrupted` says how many items made it. An item too large for a
+request of its own is refused before anything is sent - `notes.max_item_len()`
+says the limit, which is the same whether the item compresses or not.
+
+### Compression
+
+Each item is compressed with zstd before it is sealed, if that makes it
+shorter - text usually goes as a third of itself; what is already compressed
+goes as it is. Nothing to do on the reading side: entries come back as they
+were pushed.
+
+Turn it off for an app that puts a secret and text someone else chose into
+one item - a password next to a web page's title, say:
+
+```rust
+use efema::Compression;
+
+let vault = Client::open(relay, &state, "vault".parse()?, Epoch(1), secret)
+    .await?
+    .with_compression(Compression::Off);
+```
+
+Compressed, an entry's length depends on how much of the item repeats, and
+the relay sees lengths - with text an attacker chose next to a secret, that
+is enough to learn the secret a guess at a time. The
+[threat model](/efema/concepts/threat-model/) has the details.
 
 ## Pull, apply, acknowledge
 
@@ -101,6 +125,29 @@ One request sleeps on the relay until the stream moves past the device's
 acknowledged cursor, or the time runs out (at most a minute). Acknowledge
 before waiting: a wait from an old cursor returns at once.
 
+## Change the passphrase
+
+```rust
+notes.change_passphrase(new_passphrase.as_bytes()).await?;
+```
+
+The stream's key stays, and nothing in the stream is sealed again: the key is
+locked under the new passphrase and the lock written to the stream. Every
+device takes it in as it reads past it, and asks for the new passphrase from
+its next start - opening with the old one is `Error::WrongPassphrase` there. A
+device that joins later opens with the new passphrase. A device that opens
+with the key itself (`Secret::Key`) is not affected.
+
+If two devices change the passphrase at the same moment, the change that
+reached the stream first holds on every device, and the other one gets
+`Error::PassphraseRace`.
+
+**This does not lock out whoever knew the old passphrase.** The old lock stays
+in the stream - the stream only grows - so with the old passphrase and a copy
+of the stream the key still opens. Change a passphrase that was weak, or one
+the doctor says is locked with weaker parameters than today's. For a
+passphrase that leaked, start a new stream and push the app's data into it.
+
 ## Epochs
 
 An epoch is the version of the format the app writes. When a new version of
@@ -132,7 +179,8 @@ merge it with what it reads - is its call.
 
 Two more say the relay sent something it should not have: `BrokenChain` (a
 link that does not follow) and `Inauthentic` (an entry changed after it was
-sealed). A pull delivers everything before such an entry, and stops there.
+sealed, or a lock of the key the key did not seal). A pull delivers everything
+before such an entry, and stops there.
 
 ## Doctor
 
@@ -151,7 +199,7 @@ epoch    1 - written, and read up to
 
 One report, the same in every app: whether the relay answers, how far behind
 the device is, which key the stream is sealed under (the same id on every
-device) and how old its lock is. `report.problems()` lists what is wrong, one
+device), how old its lock is and how many times the passphrase was changed. `report.problems()` lists what is wrong, one
 line each, with what to do about it. Show it under your app's own `doctor`
 command.
 

@@ -11,8 +11,9 @@ use crate::transport::TransportError;
 ///
 /// The variants are sorted by what the app can do: try again later
 /// ([`Error::Transport`]), update itself ([`Error::EpochBehind`],
-/// [`Error::NewerEpoch`], [`Error::NewerEntryFormat`]), ask the person
-/// ([`Error::WrongPassphrase`], [`Error::KeyMismatch`]), or recover a stream
+/// [`Error::NewerEpoch`], [`Error::NewerEntryFormat`], [`Error::NewerCodec`]),
+/// ask the person ([`Error::WrongPassphrase`], [`Error::KeyMismatch`],
+/// [`Error::PassphraseRace`]), or recover a stream
 /// the relay no longer has as this device knew it ([`Error::StreamGone`],
 /// [`Error::StreamReplaced`], [`Error::CursorAhead`],
 /// [`Error::CursorDiverged`]).
@@ -61,10 +62,24 @@ pub enum Error {
     /// format this one does not read. The cursor stays before it.
     #[error("stream {stream}: the entry at position {seq} is in entry format {version}, newer than this library reads")]
     NewerEntryFormat { stream: StreamName, seq: u64, version: u8 },
+    /// The next entry was compressed by a newer release of this library, in
+    /// a way this one does not read. The cursor stays before it.
+    #[error(
+        "stream {stream}: the entry at position {seq} is compressed with codec {codec}, newer than this library reads"
+    )]
+    NewerCodec { stream: StreamName, seq: u64, codec: u8 },
 
-    /// The passphrase does not unlock the stream's key.
+    /// The passphrase does not unlock the stream's key. When the passphrase
+    /// was changed on another device, the old one stops opening the stream
+    /// here once this device has read the change.
     #[error("the passphrase does not unlock the key of stream {stream}")]
     WrongPassphrase { stream: StreamName },
+    /// Another device changed the passphrase at the same moment, and its
+    /// change came first in the stream: the passphrase is now the one it set.
+    #[error(
+        "the passphrase of stream {stream} was changed on another device at the same moment, and that change holds"
+    )]
+    PassphraseRace { stream: StreamName },
     /// The key given is not the stream's key.
     #[error("stream {stream} is sealed under key {stream_key}, not under the key given ({ours})")]
     KeyMismatch { stream: StreamName, ours: KeyId, stream_key: KeyId },

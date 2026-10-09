@@ -18,7 +18,8 @@
 //! - [`Relay`] - the relay to talk to; it implements [`Transport`].
 //! - [`Client`] - one device's view of one stream: [`push`](Client::push),
 //!   [`pull`](Client::pull), [`ack`](Client::ack), [`wait`](Client::wait),
-//!   and [`doctor`](Client::doctor) to report on all of it.
+//!   [`change_passphrase`](Client::change_passphrase), and
+//!   [`doctor`](Client::doctor) to report on all of it.
 //!
 //! # Keys
 //!
@@ -28,6 +29,16 @@
 //! unlocks the key with the same passphrase and keeps the lock in its state,
 //! so it opens without the network after that. The key itself is never
 //! written anywhere unless the app asks for it with [`Client::key`].
+//!
+//! Changing the passphrase locks the same key again and writes the new lock
+//! to the stream; nothing is sealed again, and every device moves to the new
+//! lock as it reads it.
+//!
+//! # Compression
+//!
+//! Items are compressed with zstd before they are sealed, each one only if it
+//! gets shorter - text usually to a third. [`Compression::Off`] turns it off
+//! for an app that mixes secrets with text someone else chose in one item.
 //!
 //! # Delivery
 //!
@@ -55,7 +66,7 @@ mod transport;
 pub use client::{Client, Pulled, Pushed, Received, Secret};
 pub use doctor::{KeyReport, RelayReport, Report};
 pub use efema_proto::{Cursor, Epoch, StreamId, StreamName};
-pub use envelope::ENTRY_OVERHEAD;
+pub use envelope::{Compression, ENTRY_OVERHEAD};
 pub use error::Error;
 pub use lacodda_seal::{Key, KeyId, LockedKey};
 pub use relay::{InvalidUrl, Relay};

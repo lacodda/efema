@@ -15,3 +15,5 @@ earlier one says so; the earlier one is marked superseded rather than deleted.
 | [0008](0008-lacodda-seal-in-this-workspace.md) | lacodda-seal lives here, with a version of its own | Accepted |
 | [0009](0009-a-stream-key-locked-in-the-stream.md) | One random key per stream, locked under the passphrase, kept in the stream | Accepted |
 | [0010](0010-the-client-library.md) | The client - async, at least once, and a writer names its stream | Accepted |
+| [0011](0011-compressed-before-sealed.md) | Items are compressed before they are sealed, with a codec byte of their own | Accepted |
+| [0012](0012-a-changed-passphrase-is-a-new-lock.md) | A changed passphrase is a new lock of the same key, sealed by the key | Accepted |

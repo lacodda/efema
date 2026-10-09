@@ -1,12 +1,14 @@
 //! A device's client of one stream.
 
+use std::ops::ControlFlow;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use efema_proto::wire::{Batch, ProblemCode, Watch};
+use efema_proto::wire::{Batch, Entry, ProblemCode, Watch};
 use efema_proto::{Cursor, Epoch, StreamId, StreamName, chain};
-use lacodda_seal::{Key, LockedKey};
+use lacodda_seal::{Key, KeyId, LockedKey};
 
-use crate::envelope::{self, ENTRY_OVERHEAD, KEY_CONTEXT, Opened};
+use crate::envelope::{self, Compression, ENTRY_OVERHEAD, KEY_CONTEXT, KeyEntry, Opened};
 use crate::state::State;
 use crate::transport::{Transport, TransportError};
 use crate::{DeviceId, Error};
@@ -59,7 +61,25 @@ pub struct Client<T> {
     id: StreamId,
     epoch: Epoch,
     key: Key,
+    lock: Mutex<Current>,
+    compression: Compression,
+}
+
+/// The newest lock of the stream's key this device has read.
+#[derive(Clone)]
+struct Current {
     lock: LockedKey,
+    generation: u32,
+}
+
+/// What one entry is for the device.
+enum Step {
+    /// An entry for the app.
+    Entry(Received),
+    /// A lock of the stream's key, of this generation.
+    Relock(LockedKey, u32),
+    /// Nothing: a lock of another key.
+    Nothing,
 }
 
 impl<T: Transport> std::fmt::Debug for Client<T> {
@@ -71,6 +91,7 @@ impl<T: Transport> std::fmt::Debug for Client<T> {
             .field("epoch", &self.epoch)
             .field("key", &self.key)
             .field("device", &self.state.device())
+            .field("compression", &self.compression)
             .finish()
     }
 }
@@ -153,28 +174,44 @@ impl<T: Transport> Client<T> {
             move || state.known(&stream)
         })
         .await?;
-        let (id, lock, key) = match known {
+        let (id, current, key) = match known {
             Some(known) => {
                 let lock = LockedKey::from_bytes(&known.lock)?;
                 let key = take_key(&lock, secret, &stream).await?;
-                (known.stream, lock, key)
+                (known.stream, Current { lock, generation: known.generation }, key)
             }
             None => {
-                let (id, lock, key) = establish(&transport, &stream, epoch, secret).await?;
+                let (id, current, key) = establish(&transport, &stream, epoch, secret).await?;
                 blocking({
                     let state = state.clone();
                     let stream = stream.clone();
-                    let lock = lock.to_bytes();
-                    move || state.join(&stream, id, &lock)
+                    let lock = current.lock.to_bytes();
+                    let generation = current.generation;
+                    move || state.join(&stream, id, &lock, generation)
                 })
                 .await?;
-                (id, lock, key)
+                (id, current, key)
             }
         };
-        Ok(Self { transport, state: state.clone(), stream, id, epoch, key, lock })
+        let lock = Mutex::new(current);
+        Ok(Self { transport, state: state.clone(), stream, id, epoch, key, lock, compression: Compression::default() })
     }
 
-    /// Seals each item and appends them to the stream, in order.
+    /// The client with items compressed - or not - before they are sealed.
+    /// zstd by default; see [`Compression::Off`] for when not to.
+    #[must_use]
+    pub fn with_compression(mut self, compression: Compression) -> Self {
+        self.compression = compression;
+        self
+    }
+
+    /// Whether items are compressed before they are sealed.
+    pub fn compression(&self) -> Compression {
+        self.compression
+    }
+
+    /// Compresses and seals each item, and appends them to the stream, in
+    /// order.
     ///
     /// Items that fit in one request go as one batch - all on consecutive
     /// positions, or none. More than that is cut into several batches, each
@@ -184,7 +221,8 @@ impl<T: Transport> Client<T> {
     /// # Errors
     ///
     /// [`Error::ItemTooLarge`] before anything is sent, when one item cannot
-    /// fit in a request; [`Error::EpochBehind`] when a newer version of the
+    /// fit in a request uncompressed - whether it compresses does not change
+    /// the limit; [`Error::EpochBehind`] when a newer version of the
     /// app has moved the stream on; [`Error::StreamGone`] and
     /// [`Error::StreamReplaced`] when the relay no longer has the stream this
     /// device knew - nothing is written then.
@@ -202,7 +240,7 @@ impl<T: Transport> Client<T> {
             if item.len() > sizer.max_item() {
                 return Err(Error::ItemTooLarge { size: item.len(), limit: sizer.max_item() });
             }
-            let entry = envelope::seal(&self.key, self.epoch, self.state.device(), item)?;
+            let entry = envelope::seal(&self.key, self.epoch, self.state.device(), item, self.compression)?;
             match batches.last_mut() {
                 Some(batch) if sizer.fits(body, batch.len(), entry.len()) => {
                     body = sizer.grow(body, batch.len(), entry.len());
@@ -274,14 +312,23 @@ impl<T: Transport> Client<T> {
         let mut entries = Vec::new();
         let mut previous = cursor;
         let mut through: Option<Cursor> = None;
+        let mut newest = self.current();
+        let mut relocked = false;
         for entry in &page.entries {
             let seq = entry.seq;
             let stop = match self.check(&previous, entry) {
-                Ok(Some(received)) => {
+                Ok(Step::Entry(received)) => {
                     entries.push(received);
                     None
                 }
-                Ok(None) => None,
+                Ok(Step::Relock(lock, generation)) => {
+                    if generation > newest.generation {
+                        newest = Current { lock, generation };
+                        relocked = true;
+                    }
+                    None
+                }
+                Ok(Step::Nothing) => None,
                 Err(stop) => Some(stop),
             };
             if let Some(stop) = stop {
@@ -295,25 +342,22 @@ impl<T: Transport> Client<T> {
             previous = Cursor { stream: page.stream, seq, hash: entry.hash };
             through = Some(previous);
         }
+        if relocked {
+            self.adopt(newest).await?;
+        }
         Ok(Pulled { entries, through, head: page.head })
     }
 
-    /// What one entry is for the app: an entry, nothing (a key), or the
-    /// reason to stop in front of it.
-    fn check(&self, previous: &Cursor, entry: &efema_proto::wire::Entry) -> Result<Option<Received>, Error> {
+    /// What one entry is for the device: an entry for the app, a lock of
+    /// the key, nothing, or the reason to stop in front of it.
+    fn check(&self, previous: &Cursor, entry: &Entry) -> Result<Step, Error> {
         let stream = || self.stream.clone();
-        if entry.seq != previous.seq + 1
-            || chain::link(&previous.hash, entry.seq, entry.epoch, &entry.data) != entry.hash
-        {
-            return Err(Error::BrokenChain { stream: stream(), seq: entry.seq });
-        }
+        follows(previous, entry, &self.stream)?;
         if entry.epoch > self.epoch {
             return Err(Error::NewerEpoch { stream: stream(), seq: entry.seq, ours: self.epoch, entry: entry.epoch });
         }
         if lacodda_seal::is_locked_key(&entry.data) {
-            // The stream's key, or a lock a second device wrote while racing
-            // to create it: nothing for the app either way.
-            return Ok(None);
+            return self.check_key_entry(entry);
         }
         if !lacodda_seal::is_sealed(&entry.data) {
             return Err(Error::ForeignEntry { stream: stream(), seq: entry.seq });
@@ -328,17 +372,153 @@ impl<T: Transport> Client<T> {
             Err(e) => return Err(e.into()),
         }
         match envelope::open(&self.key, entry.epoch, &entry.data) {
-            Ok(Opened::Entry { device, data }) => Ok(Some(Received {
+            Ok(Opened::Entry { device, data }) => Ok(Step::Entry(Received {
                 seq: entry.seq,
                 epoch: entry.epoch,
                 device,
                 own: device == self.state.device(),
                 data,
             })),
-            Ok(Opened::Newer(version)) => Err(newer(version)),
+            Ok(Opened::NewerFormat(version)) => Err(newer(version)),
+            Ok(Opened::NewerCodec(codec)) => Err(Error::NewerCodec { stream: stream(), seq: entry.seq, codec }),
             Err(lacodda_seal::Error::Inauthentic) => Err(Error::Inauthentic { stream: stream(), seq: entry.seq }),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// What a key entry is for this device: a lock of its key under some
+    /// passphrase, or a lock of another key - one a second device wrote while
+    /// racing to create the stream, which lost and is nothing for anyone.
+    fn check_key_entry(&self, entry: &Entry) -> Result<Step, Error> {
+        let read = KeyEntry::from_bytes(&entry.data)?;
+        if read.lock.key_id() != self.key.id() {
+            return Ok(Step::Nothing);
+        }
+        // A lock of this key that the key did not seal was not written by a
+        // device holding it: taken in, it would stop every device from
+        // opening with the passphrase.
+        match read.generation(&self.key) {
+            Some(generation) => Ok(Step::Relock(read.lock, generation)),
+            None => Err(Error::Inauthentic { stream: self.stream.clone(), seq: entry.seq }),
+        }
+    }
+
+    /// Keeps a newer lock of the key - the passphrase that opens the stream
+    /// on this device from now on. The state only ever moves to a newer
+    /// generation, and the client takes whatever the state then holds: two
+    /// reads racing on one client cannot take it back.
+    async fn adopt(&self, newer: Current) -> Result<(), Error> {
+        let known = blocking({
+            let state = self.state.clone();
+            let stream = self.stream.clone();
+            let (id, lock, generation) = (self.id, newer.lock.to_bytes(), newer.generation);
+            move || {
+                state.relock(&stream, id, &lock, generation)?;
+                state.known(&stream)
+            }
+        })
+        .await?;
+        if let Some(known) = known.filter(|known| known.stream == self.id) {
+            *self.lock_current() = Current { lock: LockedKey::from_bytes(&known.lock)?, generation: known.generation };
+        }
+        Ok(())
+    }
+
+    /// Changes the passphrase that unlocks the stream's key, everywhere.
+    ///
+    /// The key stays the same - nothing in the stream is sealed again. The
+    /// key is locked under the new passphrase, with today's Argon2id
+    /// parameters, and written to the stream as a key entry; every device
+    /// takes it in as it reads past it, this one included, and asks for the
+    /// new passphrase from its next start. A device that joins later opens
+    /// with the new passphrase.
+    ///
+    /// The old passphrase is not revoked: its lock stays in the stream, which
+    /// only grows. Whoever knows it and holds a copy of the stream can still
+    /// unlock the key. A passphrase that leaked needs a new stream; this is
+    /// for one that was weak, or locked with weaker parameters than today's.
+    ///
+    /// Reads the stream from this device's cursor to its head first, for
+    /// the newest lock: a change has to follow it to hold.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::PassphraseRace`] when another device changed the passphrase
+    /// at the same moment and its change came first - the passphrase is the
+    /// one it set; [`Error::EpochBehind`], [`Error::StreamGone`] and
+    /// [`Error::StreamReplaced`] as for [`Client::push`].
+    pub async fn change_passphrase(&self, passphrase: &[u8]) -> Result<(), Error> {
+        let read = self.follow_keys(self.cursor().await?, None).await?;
+        // Saturates: a change at the last generation holds for good, and one
+        // after it loses to it like any change written behind another.
+        let generation = self.current().generation.saturating_add(1);
+        let lock = blocking({
+            let key = self.key.clone();
+            let passphrase = passphrase.to_vec();
+            move || {
+                let lock = LockedKey::lock(&key, &passphrase, KEY_CONTEXT);
+                wipe(passphrase);
+                lock
+            }
+        })
+        .await?;
+        let entry = KeyEntry::new(&self.key, lock.clone(), generation)?;
+        let batch = Batch { epoch: self.epoch, entries: vec![entry.to_bytes()], stream: Some(self.id) };
+        let written = match self.transport.append(&self.stream, &batch).await {
+            Ok(written) if written.stream != self.id => {
+                return Err(Error::StreamReplaced { stream: self.stream.clone() });
+            }
+            Ok(written) => written,
+            Err(e) => return Err(write_error(e, &self.stream, self.epoch)),
+        };
+        // Another device may have changed the passphrase at the same moment.
+        // The first change in the stream holds, everywhere: read up to ours
+        // to know which one that is.
+        self.follow_keys(read, Some(written.last)).await?;
+        if self.current().lock == lock { Ok(()) } else { Err(Error::PassphraseRace { stream: self.stream.clone() }) }
+    }
+
+    /// Reads the stream from `from` up to position `until`, or to its head,
+    /// checking each link, and takes in the newest lock of the key on the
+    /// way. Where it stopped.
+    async fn follow_keys(&self, from: Cursor, until: Option<u64>) -> Result<Cursor, Error> {
+        let mut previous = from;
+        let mut newest = self.current();
+        let mut relocked = false;
+        let limit = self.transport.limits().await?.page_entries;
+        scan(&self.transport, &self.stream, Some(from), limit, |id, entry| {
+            if until.is_some_and(|until| entry.seq > until) {
+                return Ok(ControlFlow::Break(()));
+            }
+            if id != self.id {
+                return Err(Error::StreamReplaced { stream: self.stream.clone() });
+            }
+            follows(&previous, entry, &self.stream)?;
+            if lacodda_seal::is_locked_key(&entry.data)
+                && let Step::Relock(lock, generation) = self.check_key_entry(entry)?
+                && generation > newest.generation
+            {
+                newest = Current { lock, generation };
+                relocked = true;
+            }
+            previous = entry.cursor(id);
+            Ok(ControlFlow::Continue(()))
+        })
+        .await?;
+        if relocked {
+            self.adopt(newest).await?;
+        }
+        Ok(previous)
+    }
+
+    fn current(&self) -> Current {
+        self.lock_current().clone()
+    }
+
+    fn lock_current(&self) -> MutexGuard<'_, Current> {
+        // Nothing panics while holding it; a poisoned lock still holds a
+        // whole value.
+        self.lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Records that the app has applied everything `pulled` returned: the
@@ -384,9 +564,16 @@ impl<T: Transport> Client<T> {
         &self.key
     }
 
-    /// The stream's key as locked under the passphrase.
-    pub fn locked_key(&self) -> &LockedKey {
-        &self.lock
+    /// The stream's key as locked under the passphrase - the newest lock
+    /// this device has read.
+    pub fn locked_key(&self) -> LockedKey {
+        self.current().lock
+    }
+
+    /// How many times the stream's passphrase has been changed, as far as
+    /// this device has read: the generation of [`Client::locked_key`].
+    pub fn passphrase_changes(&self) -> u32 {
+        self.current().generation
     }
 
     /// The stream's name.
@@ -431,10 +618,9 @@ async fn establish<T: Transport>(
     stream: &StreamName,
     epoch: Epoch,
     secret: Secret<'_>,
-) -> Result<(StreamId, LockedKey, Key), Error> {
-    if let Some((id, lock)) = first_lock(transport, stream).await? {
-        let key = take_key(&lock, secret, stream).await?;
-        return Ok((id, lock, key));
+) -> Result<(StreamId, Current, Key), Error> {
+    if let Some((first, entry)) = first_key_entry(transport, stream).await? {
+        return join(transport, stream, first, entry, secret).await;
     }
     let Secret::Passphrase(passphrase) = secret else {
         return Err(Error::NoStreamKey { stream: stream.clone() });
@@ -450,50 +636,160 @@ async fn establish<T: Transport>(
         }
     })
     .await?;
-    let batch = Batch { epoch, entries: vec![lock.to_bytes()], stream: None };
+    let entry = KeyEntry::new(&key, lock, 0)?;
+    let batch = Batch { epoch, entries: vec![entry.to_bytes()], stream: None };
     transport.append(stream, &batch).await.map_err(|e| write_error(e, stream, epoch))?;
 
     // Another device may have created a key for the same stream at the same
-    // moment. The first lock in the stream is the stream's key, for everyone:
-    // read it back, and give up ours if it lost.
-    let (id, first) = first_lock(transport, stream)
+    // moment. The first key entry in the stream is the stream's key, for
+    // everyone: read it back, and give up ours if it lost.
+    let (first, entry) = first_key_entry(transport, stream)
         .await?
         .ok_or_else(|| not_protocol(transport, "a key was written to the stream and is not there".into()))?;
-    if first.key_id() == key.id() {
-        return Ok((id, first, key));
+    if entry.lock.key_id() == key.id() {
+        return Ok((first.stream, Current { lock: entry.lock, generation: 0 }, key));
     }
-    let theirs = unlock(&first, passphrase, stream).await?;
-    Ok((id, first, theirs))
+    join(transport, stream, first, entry, Secret::Passphrase(passphrase)).await
 }
 
-/// The first lock in the stream, with the stream's incarnation; `None` if
-/// there is no stream or no lock in it.
-async fn first_lock<T: Transport>(transport: &T, stream: &StreamName) -> Result<Option<(StreamId, LockedKey)>, Error> {
-    let limits = transport.limits().await?;
-    let mut after: Option<Cursor> = None;
-    // The lock is the first entry of every stream a client created: one entry
+/// Takes a stream's key with a secret, on a device that has not synced the
+/// stream before: from the first key entry, or - when the passphrase was
+/// changed since - from a later one.
+async fn join<T: Transport>(
+    transport: &T,
+    stream: &StreamName,
+    first: Cursor,
+    entry: KeyEntry,
+    secret: Secret<'_>,
+) -> Result<(StreamId, Current, Key), Error> {
+    let generation_of = |entry: &KeyEntry, key: &Key, seq: u64| {
+        entry.generation(key).ok_or_else(|| Error::Inauthentic { stream: stream.clone(), seq })
+    };
+    let passphrase = match secret {
+        Secret::Key(key) => {
+            let key = take_key(&entry.lock, Secret::Key(key), stream).await?;
+            let generation = generation_of(&entry, &key, first.seq)?;
+            return Ok((first.stream, Current { lock: entry.lock, generation }, key));
+        }
+        Secret::Passphrase(passphrase) => passphrase,
+    };
+    match unlock(&entry.lock, passphrase, stream).await {
+        Ok(key) => {
+            let generation = generation_of(&entry, &key, first.seq)?;
+            return Ok((first.stream, Current { lock: entry.lock, generation }, key));
+        }
+        Err(Error::WrongPassphrase { .. }) => {}
+        Err(e) => return Err(e),
+    }
+
+    // The passphrase may have been changed since the stream was created: try
+    // the later locks of the same key, the newest first.
+    let later = key_entries_after(transport, stream, first, entry.lock.key_id()).await?;
+    for (seq, candidate) in later.iter().rev() {
+        let key = match unlock(&candidate.lock, passphrase, stream).await {
+            Ok(key) => key,
+            Err(Error::WrongPassphrase { .. }) => continue,
+            Err(e) => return Err(e),
+        };
+        generation_of(candidate, &key, *seq)?;
+        // The lock that opened is not always the one that holds - an older
+        // passphrase, or a change that lost a race. The device keeps the one
+        // every other device keeps: the first of each newer generation.
+        let mut current = Current { lock: entry.lock.clone(), generation: generation_of(&entry, &key, first.seq)? };
+        for (seq, later) in &later {
+            let generation = generation_of(later, &key, *seq)?;
+            if generation > current.generation {
+                current = Current { lock: later.lock.clone(), generation };
+            }
+        }
+        return Ok((first.stream, current, key));
+    }
+    Err(Error::WrongPassphrase { stream: stream.clone() })
+}
+
+/// The stream's first key entry and where it is; `None` if there is no
+/// stream or no key in it.
+async fn first_key_entry<T: Transport>(
+    transport: &T,
+    stream: &StreamName,
+) -> Result<Option<(Cursor, KeyEntry)>, Error> {
+    let mut found = None;
+    // The key is the first entry of every stream a client created: one entry
     // answers, where a full page would carry megabytes of the stream along.
-    let mut limit = 1;
+    let read = scan(transport, stream, None, 1, |id, entry| {
+        if lacodda_seal::is_locked_key(&entry.data) {
+            found = Some((entry.cursor(id), KeyEntry::from_bytes(&entry.data)?));
+            return Ok(ControlFlow::Break(()));
+        }
+        if !lacodda_seal::is_sealed(&entry.data) {
+            return Err(Error::ForeignEntry { stream: stream.clone(), seq: entry.seq });
+        }
+        Ok(ControlFlow::Continue(()))
+    })
+    .await?;
+    Ok(read.and(found))
+}
+
+/// The key entries of `key` after `after`, with their positions, in stream
+/// order.
+async fn key_entries_after<T: Transport>(
+    transport: &T,
+    stream: &StreamName,
+    after: Cursor,
+    key: KeyId,
+) -> Result<Vec<(u64, KeyEntry)>, Error> {
+    let mut found = Vec::new();
+    let limit = transport.limits().await?.page_entries;
+    scan(transport, stream, Some(after), limit, |_, entry| {
+        if lacodda_seal::is_locked_key(&entry.data) {
+            let read = KeyEntry::from_bytes(&entry.data)?;
+            if read.lock.key_id() == key {
+                found.push((entry.seq, read));
+            }
+        }
+        Ok(ControlFlow::Continue(()))
+    })
+    .await?;
+    Ok(found)
+}
+
+/// Reads `stream` page by page after `after`, the first page `limit`
+/// entries long, handing each entry and the stream's incarnation to `visit`
+/// until it breaks or the stream ends. `None` when there is no such stream.
+async fn scan<T: Transport>(
+    transport: &T,
+    stream: &StreamName,
+    mut after: Option<Cursor>,
+    mut limit: usize,
+    mut visit: impl FnMut(StreamId, &Entry) -> Result<ControlFlow<()>, Error>,
+) -> Result<Option<()>, Error> {
+    let page_entries = transport.limits().await?.page_entries;
     loop {
-        let page = match transport.read(stream, after.as_ref(), limit).await {
-            Ok(page) => page,
-            Err(e) if e.code() == Some(&ProblemCode::StreamNotFound) => return Ok(None),
-            Err(e) => return Err(e.into()),
+        let page = match (transport.read(stream, after.as_ref(), limit).await, &after) {
+            (Ok(page), _) => page,
+            (Err(e), None) if e.code() == Some(&ProblemCode::StreamNotFound) => return Ok(None),
+            (Err(e), None) => return Err(e.into()),
+            (Err(e), Some(cursor)) => return Err(classify_read(e, stream, cursor)),
         };
         for entry in &page.entries {
-            if lacodda_seal::is_locked_key(&entry.data) {
-                return Ok(Some((page.stream, LockedKey::from_bytes(&entry.data)?)));
-            }
-            if !lacodda_seal::is_sealed(&entry.data) {
-                return Err(Error::ForeignEntry { stream: stream.clone(), seq: entry.seq });
+            if visit(page.stream, entry)?.is_break() {
+                return Ok(Some(()));
             }
         }
         match page.cursor() {
             Some(cursor) if cursor.seq < page.head => after = Some(cursor),
-            _ => return Ok(None),
+            _ => return Ok(Some(())),
         }
-        limit = limits.page_entries;
+        limit = page_entries;
     }
+}
+
+/// Whether `entry` is the link that follows `previous`.
+fn follows(previous: &Cursor, entry: &Entry, stream: &StreamName) -> Result<(), Error> {
+    if entry.seq != previous.seq + 1 || chain::link(&previous.hash, entry.seq, entry.epoch, &entry.data) != entry.hash {
+        return Err(Error::BrokenChain { stream: stream.clone(), seq: entry.seq });
+    }
+    Ok(())
 }
 
 /// The key a secret gives for a stream locked with `lock`.
