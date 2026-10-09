@@ -69,3 +69,26 @@ fn the_sealing_page_gives_the_formats_the_code_writes() {
     );
     assert!(page.contains(&stated), "the sealing page does not give the default Argon2id parameters as {stated}");
 }
+
+#[test]
+fn every_test_the_threat_model_names_is_there() {
+    // The page says which test shows each promise. Renamed or deleted, the
+    // test would leave the promise pointing at nothing.
+    let page = read("docs/src/content/docs/concepts/threat-model.md");
+    let section = page.split("## What is shown, not claimed").nth(1).expect("the threat model has its proof section");
+    let mut named = 0;
+    for row in section.lines().filter(|line| line.starts_with("| ") && line.contains("](https://")) {
+        let shown_by = row.rsplit(" | ").next().unwrap();
+        for reference in shown_by.split("), ") {
+            let name = reference.split('`').nth(1).expect("a test name in backticks");
+            let path = reference.split("([").nth(1).and_then(|rest| rest.split(']').next()).expect("a path");
+            let source = read(path);
+            assert!(
+                source.contains(&format!("fn {name}(")),
+                "the threat model names {name} in {path}, and it is not there"
+            );
+            named += 1;
+        }
+    }
+    assert!(named >= 9, "only {named} tests named: the table was not read");
+}

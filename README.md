@@ -109,10 +109,12 @@ The model, sealing, the threat model, every command and the protocol:
 
 ## Status
 
-0.2.0 is the relay, the client library with sealing built in, and
-[`lacodda-seal`](https://docs.rs/lacodda-seal), the sealing on its own. The
-relay has no access control and no TLS of its own yet: run it on loopback or a
-network you trust, behind a proxy. Changes:
+0.3.0 is the relay, the client library - entries compressed and sealed on
+the device, a passphrase that changes without sealing anything again - and
+[`lacodda-seal`](https://docs.rs/lacodda-seal), the sealing on its own. That
+the relay keeps nothing readable is shown by tests, listed in the threat
+model. The relay has no access control and no TLS of its own yet: run it on
+loopback or a network you trust, behind a proxy. Changes:
 [CHANGELOG](https://github.com/lacodda/efema/blob/main/CHANGELOG.md).
 
 ## Contributing

@@ -6,7 +6,7 @@ Devices append batches of sealed entries to named streams; the relay gives them
 positions, links them into a hash chain and hands every device what came after
 its cursor. It never decodes, merges or judges an entry. Four crates: the wire
 format (`efema-proto`), the relay (`efema-server`), the client library that
-seals every entry on the device (`efema`) and the sealing itself
+compresses and seals every entry on the device (`efema`) and the sealing itself
 (`lacodda-seal`); `examples/mini-vault` is an app built on the client. The repository was
 started by [lyrn](https://github.com/lacodda/lyrn) as its `workspace` form;
 `lyrn.toml` says which revision of the lacodda line's standard it carries.

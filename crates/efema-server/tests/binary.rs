@@ -21,6 +21,24 @@ const BIN: &str = env!("CARGO_BIN_EXE_efema-server");
 struct Served {
     child: Child,
     base: String,
+    /// The lines logged up to the address, and the channel the rest arrive
+    /// on.
+    started: Vec<String>,
+    log: mpsc::Receiver<String>,
+}
+
+impl Served {
+    /// Kills the relay and hands back every line it logged.
+    fn log(mut self) -> Vec<String> {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let mut lines = std::mem::take(&mut self.started);
+        // The reader ends with the pipe, and the channel with the reader.
+        while let Ok(line) = self.log.recv_timeout(Duration::from_secs(30)) {
+            lines.push(line);
+        }
+        lines
+    }
 }
 
 impl Drop for Served {
@@ -31,27 +49,32 @@ impl Drop for Served {
 }
 
 fn serve(dir: &Path) -> Served {
-    let child = Command::new(BIN)
+    serve_logging(dir, "info")
+}
+
+fn serve_logging(dir: &Path, level: &str) -> Served {
+    let mut child = Command::new(BIN)
         .args(["serve", "--listen", "127.0.0.1:0", "--data"])
         .arg(dir)
-        .env("EFEMA_LOG", "info")
+        .env("EFEMA_LOG", level)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    // Owned by the guard from here on, so a failed start still kills it.
-    let mut served = Served { child, base: String::new() };
 
     // The port is the system's choice; the log line is how to learn it.
-    let stderr = served.child.stderr.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
             let _ = tx.send(line);
         }
     });
+    // Owned by the guard from here on, so a failed start still kills it.
+    let mut served = Served { child, base: String::new(), started: Vec::new(), log: rx };
     loop {
-        let line = rx.recv_timeout(Duration::from_secs(30)).expect("the relay printed where it listens");
+        let line = served.log.recv_timeout(Duration::from_secs(30)).expect("the relay printed where it listens");
+        served.started.push(line.clone());
         // Piped, as under a service manager: colour codes would land in the
         // journal as text.
         assert!(!line.contains('\u{1b}'), "escape codes in a log that is not a terminal: {line:?}");
@@ -122,6 +145,36 @@ async fn serves_lists_survives_a_kill_and_keeps_its_directory_to_itself() {
     let page = read(&served.base, "notes").await;
     assert_eq!(page.stream, written.stream);
     assert_eq!(page.entries.iter().map(|e| e.data.as_slice()).collect::<Vec<_>>(), [&b"a secret"[..], b"another"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_relay_never_logs_what_it_keeps() {
+    let dir = tempfile::tempdir().unwrap();
+    let served = serve_logging(dir.path(), "trace");
+    let marker = b"ENTRY-BYTES-that-no-log-line-may-show";
+    write(&served.base, "notes", &[marker, marker]).await;
+    read(&served.base, "notes").await;
+    // A body that is not a batch is refused - and the refusal does not echo
+    // it back into the log either.
+    let refused = reqwest::Client::new()
+        .post(format!("{}/v1/streams/notes/entries", served.base))
+        .header("content-type", MEDIA_TYPE)
+        .body(marker.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 400);
+
+    let log = served.log().join("\n");
+    // A check that finds nothing in an empty log proves nothing.
+    assert!(log.contains("notes: wrote 2 entries") && log.contains("400"), "the log was not captured:\n{log}");
+    let hex: String = marker.iter().map(|b| format!("{b:02x}")).collect();
+    let listed = marker[..8].iter().map(u8::to_string).collect::<Vec<_>>().join(", ");
+    for (form, needle) in
+        [("as text", String::from_utf8_lossy(marker).into_owned()), ("in hex", hex), ("as numbers", listed)]
+    {
+        assert!(!log.contains(&needle), "the log shows an entry {form}:\n{log}");
+    }
 }
 
 #[test]
