@@ -68,7 +68,7 @@ fn run(args: &[&str], dir: &Path) -> Output {
 }
 
 async fn write(base: &str, stream: &str, entries: &[&[u8]]) -> Written {
-    let batch = Batch { epoch: Epoch(1), entries: entries.iter().map(|e| e.to_vec()).collect() };
+    let batch = Batch { epoch: Epoch(1), entries: entries.iter().map(|e| e.to_vec()).collect(), stream: None };
     let response = reqwest::Client::new()
         .post(format!("{base}/v1/streams/{stream}/entries"))
         .header("content-type", MEDIA_TYPE)

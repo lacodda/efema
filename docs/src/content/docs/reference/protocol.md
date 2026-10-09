@@ -41,9 +41,15 @@ The body is a [batch](#batch), sent with `Content-Type: application/cbor`. The
 answer is a [written](#written) record.
 
 The relay gives the entries consecutive positions after the stream's head, in
-the order listed, all of them or none. The first batch under a name creates the
-stream. A batch in an epoch below the stream's is refused; one above it raises
-the stream.
+the order listed, all of them or none. A batch in an epoch below the stream's
+is refused; one above it raises the stream.
+
+A batch that names a `stream` goes into that incarnation only: if the name
+belongs to another one now, it is refused with `stream_replaced`, and if to
+none, with `stream_not_found` - nothing is created. A batch without it goes to
+whatever stream has the name, and creates the stream if none does: that is how
+a stream's first batch is written, and the only batch a client sends without
+it.
 
 ### batch
 
@@ -51,6 +57,7 @@ the stream.
 | --- | --- | --- | --- |
 | 0 | `epoch` | uint, 32-bit | the epoch the entries are written in |
 | 1 | `entries` | array of byte strings, at least one | the entries, opaque to the relay |
+| 2 | `stream` | identity, optional | the incarnation the writer means to append to |
 
 ### written
 
@@ -149,10 +156,10 @@ A refusal has a status and a [problem](#problem) body. Programs act on `code`;
 | Status | `code` | When |
 | --- | --- | --- |
 | 400 | `bad_request` | a body that is not the expected CBOR, an empty batch, an invalid name or query parameter - unknown parameters included |
-| 404 | `stream_not_found` | a read of a stream that does not exist |
+| 404 | `stream_not_found` | a read of a stream that does not exist, or a batch naming a stream when the name has none |
 | 404 | `not_found` | a path the relay does not serve |
 | 405 | `method_not_allowed` | a path it serves, with another method |
-| 409 | `stream_replaced` | a cursor of another identity than the stream's |
+| 409 | `stream_replaced` | a cursor, or a batch naming a stream, of another identity than the stream's |
 | 409 | `cursor_ahead` | a cursor past the stream's head; `head` says where the stream ends |
 | 409 | `cursor_diverged` | a cursor whose link the stream does not have at that position |
 | 409 | `epoch_behind` | a batch in an epoch below the stream's; `epoch` says the stream's |
@@ -174,7 +181,7 @@ A client keeps codes it does not know: a later relay may add reasons.
 
 ## Limits
 
-<!-- limits: the test release_consistency holds these to efema_server::limits -->
+<!-- limits: the test release_consistency holds these to efema_proto::limits -->
 
 | Limit | Value |
 | --- | --- |

@@ -106,6 +106,10 @@ pub enum OpenError {
 pub enum AppendError {
     #[error("the stream is at epoch {current}, and the batch was written in epoch {batch}")]
     EpochBehind { current: Epoch, batch: Epoch },
+    #[error("there is no stream named {name}, and the batch expects stream {expected}")]
+    NotFound { name: StreamName, expected: StreamId },
+    #[error("the batch expects stream {expected}, and {name} is now stream {current}")]
+    Replaced { name: StreamName, expected: StreamId, current: StreamId },
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
 }
@@ -217,24 +221,30 @@ impl Store {
         Ok(Self { path, writer: Mutex::new(spare), readers: Mutex::new(vec![reader]) })
     }
 
-    /// Appends `entries` to the stream `name` in `epoch`, creating the stream
-    /// if this is its first batch. `published` runs after the commit, while
-    /// writes are still held back - so whoever it tells hears about heads in
-    /// the order they were written.
+    /// Appends `entries` to the stream `name` in `epoch`. With `expect`, only
+    /// to that incarnation of the stream; without it, to whatever stream has
+    /// the name, creating one if none does. `published` runs after the
+    /// commit, while writes are still held back - so whoever it tells hears
+    /// about heads in the order they were written.
     pub fn append(
         &self,
         name: &StreamName,
         epoch: Epoch,
         entries: &[Vec<u8>],
+        expect: Option<StreamId>,
         published: impl FnOnce(StreamId, u64),
     ) -> Result<Written, AppendError> {
         let mut conn = lock(&self.writer);
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = unix_now();
 
-        let stream = match stream_row(&tx, name)? {
-            Some(stream) => stream,
-            None => {
+        let stream = match (stream_row(&tx, name)?, expect) {
+            (Some(stream), Some(expected)) if stream.id != expected => {
+                return Err(AppendError::Replaced { name: name.clone(), expected, current: stream.id });
+            }
+            (Some(stream), _) => stream,
+            (None, Some(expected)) => return Err(AppendError::NotFound { name: name.clone(), expected }),
+            (None, None) => {
                 let id = StreamId::from_bytes(random_id());
                 tx.execute(
                     "INSERT INTO streams (name, id, epoch, head_hash, created_at, updated_at)
@@ -512,7 +522,7 @@ mod tests {
     #[test]
     fn the_schema_refuses_a_gap() {
         let (_dir, store) = store();
-        store.append(&name("s"), Epoch(1), &[b"a".to_vec()], |_, _| {}).unwrap();
+        store.append(&name("s"), Epoch(1), &[b"a".to_vec()], None, |_, _| {}).unwrap();
         let conn = lock(&store.writer);
         let error = conn
             .execute("INSERT INTO entries (stream, seq, epoch, hash, data) VALUES (1, 3, 1, zeroblob(32), x'00')", [])
@@ -523,7 +533,7 @@ mod tests {
     #[test]
     fn the_schema_refuses_an_older_epoch() {
         let (_dir, store) = store();
-        store.append(&name("s"), Epoch(2), &[b"a".to_vec()], |_, _| {}).unwrap();
+        store.append(&name("s"), Epoch(2), &[b"a".to_vec()], None, |_, _| {}).unwrap();
         let conn = lock(&store.writer);
         let error = conn
             .execute("INSERT INTO entries (stream, seq, epoch, hash, data) VALUES (1, 2, 1, zeroblob(32), x'00')", [])
@@ -534,7 +544,7 @@ mod tests {
     #[test]
     fn the_schema_refuses_to_change_or_delete_an_entry() {
         let (_dir, store) = store();
-        store.append(&name("s"), Epoch(1), &[b"a".to_vec()], |_, _| {}).unwrap();
+        store.append(&name("s"), Epoch(1), &[b"a".to_vec()], None, |_, _| {}).unwrap();
         let conn = lock(&store.writer);
         let error = conn.execute("UPDATE entries SET data = x'01'", []).unwrap_err();
         assert!(error.to_string().contains("cannot be changed"), "{error}");
@@ -543,9 +553,24 @@ mod tests {
     }
 
     #[test]
+    fn a_writer_that_expects_a_stream_never_creates_one() {
+        let (_dir, store) = store();
+        let expected = StreamId::from_bytes([1; 16]);
+        let refused = store.append(&name("s"), Epoch(1), &[b"a".to_vec()], Some(expected), |_, _| {});
+        assert!(matches!(refused, Err(AppendError::NotFound { .. })), "{refused:?}");
+        assert!(store.streams().unwrap().is_empty(), "a refused batch created a stream");
+
+        let created = store.append(&name("s"), Epoch(1), &[b"a".to_vec()], None, |_, _| {}).unwrap();
+        let refused = store.append(&name("s"), Epoch(1), &[b"b".to_vec()], Some(expected), |_, _| {});
+        assert!(matches!(refused, Err(AppendError::Replaced { .. })), "{refused:?}");
+        let written = store.append(&name("s"), Epoch(1), &[b"b".to_vec()], Some(created.stream), |_, _| {}).unwrap();
+        assert_eq!(written.first, 2);
+    }
+
+    #[test]
     fn the_head_moves_with_the_entries() {
         let (_dir, store) = store();
-        let written = store.append(&name("s"), Epoch(1), &[b"ab".to_vec(), b"cde".to_vec()], |_, _| {}).unwrap();
+        let written = store.append(&name("s"), Epoch(1), &[b"ab".to_vec(), b"cde".to_vec()], None, |_, _| {}).unwrap();
         assert_eq!((written.first, written.last), (1, 2));
         let summary = &store.streams().unwrap()[0];
         assert_eq!((summary.head, summary.bytes), (2, 5));
@@ -558,7 +583,7 @@ mod tests {
     fn a_page_keeps_to_its_byte_budget_but_never_comes_back_empty() {
         let (_dir, store) = store();
         let big = vec![0u8; 100];
-        store.append(&name("s"), Epoch(1), &[big.clone(), big.clone(), big], |_, _| {}).unwrap();
+        store.append(&name("s"), Epoch(1), &[big.clone(), big.clone(), big], None, |_, _| {}).unwrap();
         let page = store.read(&name("s"), None, PageLimit { entries: 10, bytes: 250 }).unwrap();
         assert_eq!(page.entries.len(), 2);
         let page = store.read(&name("s"), None, PageLimit { entries: 10, bytes: 10 }).unwrap();

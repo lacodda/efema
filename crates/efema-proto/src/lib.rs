@@ -42,6 +42,7 @@ pub mod chain;
 mod cursor;
 mod hex;
 mod ids;
+pub mod limits;
 mod name;
 pub mod wire;
 

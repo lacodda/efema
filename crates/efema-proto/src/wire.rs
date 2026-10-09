@@ -36,6 +36,15 @@ pub struct Batch {
     #[n(1)]
     #[cbor(with = "blobs")]
     pub entries: Vec<Vec<u8>>,
+    /// The stream incarnation the writer means to append to. With it, the
+    /// relay refuses the batch if the name now belongs to another incarnation
+    /// (`stream_replaced`) or to none (`stream_not_found`) - instead of
+    /// creating a fresh stream under the name and starting it with entries
+    /// that only make sense after a history it no longer has. Without it, the
+    /// batch goes to whatever stream has the name, and creates one if none
+    /// does: how a stream's first batch is written.
+    #[n(2)]
+    pub stream: Option<StreamId>,
 }
 
 /// The answer to a write: where the batch landed.
@@ -405,7 +414,11 @@ mod tests {
 
     #[test]
     fn a_batch_round_trips() {
-        let batch = Batch { epoch: Epoch(3), entries: vec![b"one".to_vec(), Vec::new(), vec![0xff; 300]] };
+        let batch = Batch {
+            epoch: Epoch(3),
+            entries: vec![b"one".to_vec(), Vec::new(), vec![0xff; 300]],
+            stream: Some(stream()),
+        };
         assert_eq!(decode::<Batch>(&encode(&batch)).unwrap(), batch);
     }
 
@@ -413,13 +426,23 @@ mod tests {
     fn entry_data_travels_as_byte_strings() {
         // 0xa2 map(2) · 0x00 0x01 epoch 1 · 0x01 0x82 entries: array(2) ·
         // 0x42 "hi" as bytes(2) · 0x40 empty bytes
-        let batch = Batch { epoch: Epoch(1), entries: vec![b"hi".to_vec(), Vec::new()] };
+        let batch = Batch { epoch: Epoch(1), entries: vec![b"hi".to_vec(), Vec::new()], stream: None };
         assert_eq!(encode(&batch), [0xa2, 0x00, 0x01, 0x01, 0x82, 0x42, b'h', b'i', 0x40]);
     }
 
     #[test]
+    fn a_batch_names_the_stream_it_expects_as_an_identity() {
+        // {0: 1, 1: [h'78'], 2: h'30..66'}: key 2 is a 16-byte string.
+        let batch = Batch { epoch: Epoch(1), entries: vec![b"x".to_vec()], stream: Some(stream()) };
+        let mut expected = vec![0xa3, 0x00, 0x01, 0x01, 0x81, 0x41, b'x', 0x02, 0x50];
+        expected.extend_from_slice(b"0123456789abcdef");
+        assert_eq!(encode(&batch), expected);
+        assert_eq!(decode::<Batch>(&expected).unwrap(), batch);
+    }
+
+    #[test]
     fn trailing_bytes_are_refused() {
-        let mut bytes = encode(&Batch { epoch: Epoch(1), entries: vec![b"x".to_vec()] });
+        let mut bytes = encode(&Batch { epoch: Epoch(1), entries: vec![b"x".to_vec()], stream: None });
         bytes.push(0x00);
         assert!(decode::<Batch>(&bytes).is_err());
     }

@@ -225,6 +225,29 @@ async fn streams_are_separate() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_writer_that_names_its_stream_writes_only_into_that_one() {
+    let mut relay = TestRelay::start().await;
+    let first = relay.write("notes", 1, &[b"a"]).await.unwrap();
+    let written = relay.write_to("notes", first.stream, 1, &[b"b"]).await.unwrap();
+    assert_eq!((written.first, written.stream), (2, first.stream));
+
+    // The relay loses its data and starts again: the name is free, then taken
+    // by a new incarnation. A writer that knew the old one is refused both
+    // times, and its batch never becomes the start of someone else's stream.
+    let dir = relay.stop().await;
+    std::fs::remove_dir_all(dir.path()).unwrap();
+    relay = TestRelay::start_in(dir).await;
+    let refused = relay.write_to("notes", first.stream, 1, &[b"c"]).await.unwrap_err();
+    assert_eq!((refused.status, refused.problem.code), (StatusCode::NOT_FOUND, ProblemCode::StreamNotFound));
+    assert_eq!(relay.read("notes", None, None).await.unwrap_err().problem.code, ProblemCode::StreamNotFound);
+
+    relay.write("notes", 1, &[b"fresh"]).await.unwrap();
+    let refused = relay.write_to("notes", first.stream, 1, &[b"c"]).await.unwrap_err();
+    assert_eq!((refused.status, refused.problem.code), (StatusCode::CONFLICT, ProblemCode::StreamReplaced));
+    assert_eq!(relay.read("notes", None, None).await.unwrap().head, 1, "nothing refused was written");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn malformed_requests_are_refused_and_say_why() {
     let relay = TestRelay::start().await;
     let code = |r: Result<_, common::Refused>| {
@@ -236,7 +259,7 @@ async fn malformed_requests_are_refused_and_say_why() {
     assert_eq!(code(relay.write("notes", 1, &[]).await), bad, "an empty batch");
     assert_eq!(code(relay.write("Notes", 1, &[b"x"]).await), bad, "an invalid name");
     assert_eq!(code(relay.write_raw("notes", b"not cbor".to_vec()).await), bad, "a body that is not CBOR");
-    let mut trailing = wire::encode(&Batch { epoch: Epoch(1), entries: vec![b"x".to_vec()] });
+    let mut trailing = wire::encode(&Batch { epoch: Epoch(1), entries: vec![b"x".to_vec()], stream: None });
     trailing.push(0);
     assert_eq!(code(relay.write_raw("notes", trailing).await), bad, "trailing bytes");
 
@@ -252,7 +275,7 @@ async fn malformed_requests_are_refused_and_say_why() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_batch_is_sent_as_cbor() {
     let relay = TestRelay::start().await;
-    let body = wire::encode(&Batch { epoch: Epoch(1), entries: vec![b"x".to_vec()] });
+    let body = wire::encode(&Batch { epoch: Epoch(1), entries: vec![b"x".to_vec()], stream: None });
     let response = relay
         .client
         .post(relay.url("/v1/streams/notes/entries"))

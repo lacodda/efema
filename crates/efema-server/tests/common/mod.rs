@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use efema_proto::wire::{self, Batch, Heads, Page, Problem, Watch, Written};
-use efema_proto::{Cursor, Epoch, MEDIA_TYPE};
+use efema_proto::{Cursor, Epoch, MEDIA_TYPE, StreamId};
 use efema_server::Relay;
 use reqwest::StatusCode;
 use tempfile::TempDir;
@@ -69,7 +69,20 @@ impl TestRelay {
     }
 
     pub async fn write(&self, stream: &str, epoch: u32, entries: &[&[u8]]) -> Result<Written, Refused> {
-        let batch = Batch { epoch: Epoch(epoch), entries: entries.iter().map(|e| e.to_vec()).collect() };
+        let batch = Batch { epoch: Epoch(epoch), entries: entries.iter().map(|e| e.to_vec()).collect(), stream: None };
+        self.write_raw(stream, wire::encode(&batch)).await
+    }
+
+    /// Writes only into the incarnation `expect`.
+    pub async fn write_to(
+        &self,
+        stream: &str,
+        expect: StreamId,
+        epoch: u32,
+        entries: &[&[u8]],
+    ) -> Result<Written, Refused> {
+        let batch =
+            Batch { epoch: Epoch(epoch), entries: entries.iter().map(|e| e.to_vec()).collect(), stream: Some(expect) };
         self.write_raw(stream, wire::encode(&batch)).await
     }
 

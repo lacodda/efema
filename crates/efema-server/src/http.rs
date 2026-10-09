@@ -76,7 +76,9 @@ async fn write(
         let shared = shared.clone();
         let name = name.clone();
         move || {
-            shared.store.append(&name, batch.epoch, &batch.entries, |id, head| shared.heads.publish(&name, id, head))
+            shared.store.append(&name, batch.epoch, &batch.entries, batch.stream, |id, head| {
+                shared.heads.publish(&name, id, head)
+            })
         }
     })
     .await?
@@ -85,6 +87,12 @@ async fn write(
             status: StatusCode::CONFLICT,
             problem: problem(ProblemCode::EpochBehind, e.to_string()).with_epoch(current),
         },
+        AppendError::NotFound { .. } => {
+            Failure { status: StatusCode::NOT_FOUND, problem: problem(ProblemCode::StreamNotFound, e.to_string()) }
+        }
+        AppendError::Replaced { .. } => {
+            Failure { status: StatusCode::CONFLICT, problem: problem(ProblemCode::StreamReplaced, e.to_string()) }
+        }
         AppendError::Sqlite(e) => Failure::internal(&e),
     })?;
 

@@ -34,29 +34,10 @@ pub mod store;
 
 pub use store::DATABASE_FILE;
 
-/// What the relay accepts and returns in one request. Fixed in this version;
-/// the relay will announce them (and take them from its configuration) once
-/// there is more than one sensible value.
-pub mod limits {
-    use std::time::Duration;
-
-    /// The largest request body, in bytes.
-    pub const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
-    /// Entries in a page when the reader does not say.
-    pub const PAGE_ENTRIES_DEFAULT: usize = 1000;
-    /// The most entries a reader may ask for in one page.
-    pub const PAGE_ENTRIES_MAX: usize = 10_000;
-    /// Bytes of entry data in one page, beyond which the page ends early. A
-    /// page always carries at least one entry, so no entry is unreadable.
-    pub const PAGE_BYTES: usize = 8 * 1024 * 1024;
-    /// How long a wait lasts when the waiter does not say.
-    pub const WAIT_DEFAULT: Duration = Duration::from_secs(30);
-    /// The longest wait. Below the idle timeouts of common reverse proxies, so
-    /// a wait ends with an answer rather than a dropped connection.
-    pub const WAIT_MAX: Duration = Duration::from_secs(60);
-    /// The most streams one wait may watch.
-    pub const WATCHES_MAX: usize = 64;
-}
+/// What the relay accepts and returns in one request: the limits of protocol
+/// version 1, fixed in this release. The relay will announce them (and take
+/// them from its configuration) once there is more than one sensible value.
+pub use efema_proto::limits;
 
 /// The lock file that says a relay is serving this data directory.
 pub const LOCK_FILE: &str = "efema-server.lock";
