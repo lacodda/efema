@@ -286,15 +286,22 @@ impl<T: Transport> Client<T> {
         let turn = self.state.sending(&self.stream);
         let _turn = turn.lock().await;
         let mut sent = Sent::default();
+        // Each batch at most once per send, in the order queued: a batch
+        // that did not leave the queue waits for the next send rather than
+        // holding this one in a loop.
+        let mut after = 0;
         let stopped = loop {
             let waiting = blocking({
                 let state = self.state.clone();
                 let (stream, id) = (self.stream.clone(), self.id);
-                move || state.oldest_unsent(&stream, id)
+                move || state.next_unsent(&stream, id, after)
             })
             .await;
             let result = match waiting {
-                Ok(Some(waiting)) => self.send_batch(waiting).await,
+                Ok(Some(waiting)) => {
+                    after = waiting.id;
+                    self.send_batch(waiting).await
+                }
                 Ok(None) => return Ok(sent),
                 Err(e) => Err(e),
             };

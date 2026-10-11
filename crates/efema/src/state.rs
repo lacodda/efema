@@ -425,15 +425,16 @@ impl State {
     }
 
     /// The oldest batch waiting to be sent to the incarnation `id` of
-    /// `stream`.
-    pub(crate) fn oldest_unsent(&self, stream: &StreamName, id: StreamId) -> Result<Option<Waiting>, Error> {
+    /// `stream` that was queued after the batch `after` - 0 for the oldest of
+    /// all.
+    pub(crate) fn next_unsent(&self, stream: &StreamName, id: StreamId, after: i64) -> Result<Option<Waiting>, Error> {
         let mut conn = self.conn();
         let read = (|| {
             let tx = conn.transaction()?;
             let Some((batch, epoch)) = tx
                 .query_row(
-                    "SELECT id, epoch FROM unsent WHERE name = ?1 AND stream = ?2 ORDER BY id LIMIT 1",
-                    params![stream.as_str(), id.as_bytes()],
+                    "SELECT id, epoch FROM unsent WHERE name = ?1 AND stream = ?2 AND id > ?3 ORDER BY id LIMIT 1",
+                    params![stream.as_str(), id.as_bytes(), after],
                     |row| Ok((row.get::<_, i64>(0)?, row.get::<_, u32>(1)?)),
                 )
                 .optional()?
@@ -629,7 +630,7 @@ mod tests {
         let state = State::open(dir.path().join("sync.sqlite3")).unwrap();
         let id = StreamId::from_bytes([3; 16]);
         state.join(&name("s"), id, b"lock", 0).unwrap();
-        assert!(state.oldest_unsent(&name("s"), id).unwrap().is_none());
+        assert!(state.next_unsent(&name("s"), id, 0).unwrap().is_none());
 
         state.queue(&name("s"), id, Epoch(1), &[entries(&["a", "b"]), entries(&["c"])]).unwrap();
         state.queue(&name("s"), id, Epoch(2), &[entries(&["d"])]).unwrap();
@@ -637,8 +638,14 @@ mod tests {
         assert_eq!((queued.batches, queued.items, queued.bytes), (3, 4, 4));
         assert!(queued.oldest.is_some());
 
+        // Passing over a batch leaves it in the queue, for the next send.
+        let first = state.next_unsent(&name("s"), id, 0).unwrap().unwrap();
+        let second = state.next_unsent(&name("s"), id, first.id).unwrap().unwrap();
+        assert_eq!(second.entries, entries(&["c"]));
+        assert!(state.next_unsent(&name("s"), id, i64::MAX).unwrap().is_none());
+
         let mut seen = Vec::new();
-        while let Some(waiting) = state.oldest_unsent(&name("s"), id).unwrap() {
+        while let Some(waiting) = state.next_unsent(&name("s"), id, 0).unwrap() {
             seen.push((waiting.epoch, waiting.entries.clone()));
             state.sent(waiting.id).unwrap();
         }
@@ -676,9 +683,8 @@ mod tests {
         assert!(matches!(refused, Err(Error::StreamGone { .. })), "{refused:?}");
         let refused = state.queue(&name("t"), id, Epoch(1), &[entries(&["a"])]);
         assert!(matches!(refused, Err(Error::StreamGone { .. })), "{refused:?}");
-        assert!(state.oldest_unsent(&name("s"), other).unwrap().is_none());
-
         state.queue(&name("s"), id, Epoch(1), &[entries(&["a"]), entries(&["b"]), entries(&["c"])]).unwrap();
+        assert!(state.next_unsent(&name("s"), other, 0).unwrap().is_none(), "a queue went to another incarnation");
         state.forget(&name("s")).unwrap();
         state.join(&name("s"), other, b"lock", 0).unwrap();
         assert_eq!(state.queued(&name("s")).unwrap(), Queue::default(), "a forgotten stream left its queue behind");
