@@ -38,13 +38,14 @@ $ mini-vault --relay http://127.0.0.1:2451 --folder ./desktop --state ./desktop-
 applied 0 change(s), sent 1
 $ mini-vault --relay http://127.0.0.1:2451 --folder ./laptop --state ./laptop-state sync --once
 applied 0 change(s), sent 2
-conflict: both versions kept, the other one as notes/plan (conflict 249b3cca).md
+conflict: both versions kept, the other one as notes/plan (conflict 4d3934d1).md
 $ mini-vault --relay http://127.0.0.1:2451 --folder ./laptop --state ./laptop-state doctor
 relay    http://127.0.0.1:2451 - answered in 3 ms
-stream   vault - stream 946ece38, epoch 1, 7 entries
-cursor   at 7 - up to date
-key      4f9947f501e49908 - locked 2026-10-09 (today), argon2id 64 MiB × 3 × 4
-device   28263325
+stream   vault - stream 9d43e105, epoch 1, 7 entries
+cursor   at 5 - 2 entries to read
+queue    empty
+key      1005a7587958c346 - locked 2026-10-11 (today), argon2id 64 MiB × 3 × 4
+device   22f164e5
 epoch    1 - written, and read up to
 ```
 
@@ -54,13 +55,13 @@ is the stream's key, locked under the passphrase; the rest is ciphertext:
 ```console
 $ efema-server streams vault --data ./relay
 SEQ  EPOCH      SIZE  HASH
-  1  1         172 B  6185a8ef
-  2  1         141 B  8f124ce6
-  3  1         132 B  16651889
-  4  1      47.0 KiB  2a0aad78
-  5  1         185 B  aceb0973
-  6  1         171 B  2092dd63
-  7  1         173 B  3a5190d8
+  1  1         172 B  64035340
+  2  1         123 B  8e510f17
+  3  1      47.0 KiB  001f9967
+  4  1         139 B  4ddf0520
+  5  1         199 B  d3ca7bbc
+  6  1         183 B  3f14e4b4
+  7  1         184 B  4bc3d32d
 ```
 
 ## What you get
@@ -75,8 +76,11 @@ SEQ  EPOCH      SIZE  HASH
   that is not the one it knew.
 - **Epochs.** An app that changed its format moves the stream on; older
   versions stop in front of the first newer entry instead of misreading it.
-- **Delivery that survives a crash.** A device's cursor moves only when the app
-  says it applied what it read, and survives restarts.
+- **Delivery that survives a broken network.** What a device pushes waits on
+  it, sealed, until the relay has it - through a torn connection, a relay
+  that is down, the app closing. A batch sent again after a lost answer lands
+  once. A device's cursor moves only when the app says it applied what it
+  read.
 - **One `doctor`** for every app built on it.
 
 ## Install
@@ -109,12 +113,14 @@ The model, sealing, the threat model, every command and the protocol:
 
 ## Status
 
-0.3.0 is the relay, the client library - entries compressed and sealed on
-the device, a passphrase that changes without sealing anything again - and
-[`lacodda-seal`](https://docs.rs/lacodda-seal), the sealing on its own. That
-the relay keeps nothing readable is shown by tests, listed in the threat
-model. The relay has no access control and no TLS of its own yet: run it on
-loopback or a network you trust, behind a proxy. Changes:
+0.4.0 is the relay and the client library: entries compressed and sealed on
+the device, kept there until the relay has them, and written once however
+often a broken network sends them again. Tests listed in the threat model show
+that the relay keeps nothing readable and that a torn connection loses and
+doubles nothing. Alongside ship two crates of the line,
+[`lacodda-seal`](https://docs.rs/lacodda-seal) and
+[`lacodda-tear`](https://docs.rs/lacodda-tear). No access control and no TLS
+of its own yet: run the relay on loopback or behind a proxy. Changes:
 [CHANGELOG](https://github.com/lacodda/efema/blob/main/CHANGELOG.md).
 
 ## Contributing

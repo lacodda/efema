@@ -10,8 +10,35 @@ breaks one of them - or the cursor's hash chain, or the sealing formats every
 stream is written in - gets a "Breaking Changes" section here, with the way
 across or a plain statement that there is none.
 
-`lacodda-seal` keeps a version of its own (0.1.0 since efema 0.2.0); its
-changes are listed under the efema release they shipped with.
+`lacodda-seal` and `lacodda-tear` keep versions of their own (lacodda-seal
+0.1.0 since efema 0.2.0, lacodda-tear 0.1.0 since efema 0.4.0); their changes
+are listed under the efema release they shipped with.
+
+## [0.4.0] - 2026-10-11
+
+### Breaking Changes
+
+- **Know a batch by what it holds, and write it once**: equal batches are one batch: the same bytes written
+twice to a stream land once. `Store::append` takes a `Batch`.
+- **Keep what is pushed on the device until the relay has it**: push returns `Sent` instead of `Pushed` with
+positions; `Error::Interrupted` is replaced by `Error::Unsent`, which
+also wraps any reason sending stopped after the items were kept.
+
+### Features
+
+- Add lacodda-tear, a proxy that tears connections for tests
+- Know a batch by what it holds, and write it once
+- Keep what is pushed on the device until the relay has it
+
+### Bug Fixes
+
+- Send each queued batch at most once per send
+
+### Testing
+
+- Show what an older app left waiting refused until forgotten
+- Hold the queue to answers that do not fit and to an outage
+
 
 ## [0.3.0] - 2026-10-09
 

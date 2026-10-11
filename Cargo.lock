@@ -446,12 +446,13 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "efema"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "efema-proto",
  "efema-server",
  "getrandom 0.4.3",
  "lacodda-seal",
+ "lacodda-tear",
  "minicbor",
  "reqwest",
  "rusqlite",
@@ -464,7 +465,7 @@ dependencies = [
 
 [[package]]
 name = "efema-proto"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "minicbor",
  "sha2",
@@ -472,7 +473,7 @@ dependencies = [
 
 [[package]]
 name = "efema-server"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -482,6 +483,7 @@ dependencies = [
  "form_urlencoded",
  "futures-util",
  "getrandom 0.4.3",
+ "lacodda-tear",
  "minicbor",
  "reqwest",
  "rusqlite",
@@ -967,6 +969,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lacodda-tear"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1057,6 +1066,7 @@ dependencies = [
  "clap",
  "efema",
  "efema-server",
+ "lacodda-tear",
  "minicbor",
  "sha2",
  "tempfile",

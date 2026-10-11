@@ -64,11 +64,13 @@ silently read past.
 
 ## Status
 
-0.3.0 is the relay and the Rust client library,
+0.4.0 is the relay and the Rust client library,
 [`efema`](https://docs.rs/efema): every entry compressed and sealed on the
-device with a key the relay never has, a passphrase that changes without
-sealing anything again, cursors that survive restarts, epochs on both sides -
-and the promise that the relay keeps nothing readable shown by tests, not only
+device with a key the relay never has, kept there until the relay has it and
+written once however often a broken network sends it again, a passphrase that
+changes without sealing anything again, cursors that survive restarts, epochs
+on both sides - and the promises that the relay keeps nothing readable and
+that a torn connection loses and doubles nothing shown by tests, not only
 stated. The relay has no access control of its own yet - it arrives in 0.5.0 -
 so run it on loopback or a network you trust, behind a proxy for TLS.
 [Syncing an app](/efema/guides/syncing-an-app/) is where to start.
