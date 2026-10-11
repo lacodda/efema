@@ -33,9 +33,14 @@ stream - in the order the batch lists them.
 
 Two promises hold for every batch, whoever else is writing at the same time:
 
-- **Whole or nothing.** A batch lands completely or not at all.
+- **Whole or nothing.** A batch lands completely or not at all - a connection
+  torn partway through one writes none of it.
 - **Together.** Its entries take consecutive positions; no other writer's
   entry lands between two entries of one batch.
+- **Once.** A batch is known by what it holds. Sent again - because the answer
+  to the first sending was lost - it is not written a second time: the answer
+  says where it landed. A writer that lost an answer sends the same batch
+  again and nothing else, and the stream holds it once.
 
 And one for every stream: **one order for everyone.** Positions have no gaps
 and no repeats, and every reader reads the same sequence - whatever page size

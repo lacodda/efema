@@ -1,14 +1,18 @@
 //! The relay's storage: one SQLite database in the data directory.
 //!
-//! Two tables. `streams` holds one row per stream - its identity, epoch and
-//! head; `entries` holds the entries, keyed by stream and position. The schema
-//! itself enforces what the relay promises, so a bug in the code above it
-//! fails a write instead of corrupting a stream:
+//! Three tables. `streams` holds one row per stream - its identity, epoch and
+//! head; `entries` holds the entries, keyed by stream and position; `batches`
+//! holds the key of every batch written and where it landed, so a batch sent
+//! again is answered rather than written twice. The schema itself enforces
+//! what the relay promises, so a bug in the code above it fails a write
+//! instead of corrupting a stream:
 //!
 //! - an entry is inserted only at the position right after the head, so a
 //!   stream has no gaps and no position twice;
 //! - an entry's epoch is never below the stream's;
-//! - an entry, once written, cannot be changed or deleted.
+//! - an entry, once written, cannot be changed or deleted;
+//! - a batch is recorded once per stream, ending at the head it moved, after
+//!   every batch before it - and, once recorded, stays as it is.
 //!
 //! Writes go through one connection, one transaction per batch; reads use
 //! their own connections and see a consistent snapshot (WAL), so a reader
@@ -18,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use efema_proto::wire::{Entry, Page, Written};
+use efema_proto::wire::{Batch, Entry, Page, Written};
 use efema_proto::{Cursor, Epoch, Hash, StreamId, StreamName, chain};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
@@ -26,11 +30,12 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, pa
 pub const DATABASE_FILE: &str = "relay.sqlite3";
 
 /// The schema version this build writes and reads (`PRAGMA user_version`).
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// Migrations, in order: index `i` takes the database from version `i` to
 /// `i + 1`. An applied migration is never edited - a change is a new one.
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE streams (
     key        INTEGER PRIMARY KEY,
     name       TEXT    NOT NULL UNIQUE,
@@ -82,7 +87,44 @@ BEFORE DELETE ON entries
 BEGIN
     SELECT RAISE(ABORT, 'an entry cannot be deleted');
 END;
-"#];
+"#,
+    r#"
+-- Every batch written since this migration, by its key. A batch sent again -
+-- its answer lost on the way back - is answered with where it landed. The
+-- primary key keeps a stream from holding one batch twice even if the code
+-- above forgot to look.
+CREATE TABLE batches (
+    stream INTEGER NOT NULL REFERENCES streams (key),
+    key    BLOB    NOT NULL CHECK (length(key) = 32),
+    first  INTEGER NOT NULL CHECK (first >= 1),
+    last   INTEGER NOT NULL CHECK (last >= first),
+    PRIMARY KEY (stream, key)
+) STRICT;
+
+-- A batch is recorded in the transaction that wrote it, once its entries are
+-- in: it ends at the head, and after every batch before it.
+CREATE TRIGGER batches_end_at_the_head
+BEFORE INSERT ON batches
+BEGIN
+    SELECT RAISE(ABORT, 'a batch must end at the head of its stream')
+    WHERE NEW.last <> (SELECT head FROM streams WHERE key = NEW.stream);
+    SELECT RAISE(ABORT, 'a batch cannot overlap the batch before it')
+    WHERE NEW.first <= (SELECT coalesce(max(last), 0) FROM batches WHERE stream = NEW.stream);
+END;
+
+CREATE TRIGGER batches_are_immutable
+BEFORE UPDATE ON batches
+BEGIN
+    SELECT RAISE(ABORT, 'a batch cannot be changed');
+END;
+
+CREATE TRIGGER batches_are_permanent
+BEFORE DELETE ON batches
+BEGIN
+    SELECT RAISE(ABORT, 'a batch cannot be deleted');
+END;
+"#,
+];
 
 /// What can go wrong opening the database.
 #[derive(Debug, thiserror::Error)]
@@ -221,24 +263,26 @@ impl Store {
         Ok(Self { path, writer: Mutex::new(spare), readers: Mutex::new(vec![reader]) })
     }
 
-    /// Appends `entries` to the stream `name` in `epoch`. With `expect`, only
-    /// to that incarnation of the stream; without it, to whatever stream has
-    /// the name, creating one if none does. `published` runs after the
-    /// commit, while writes are still held back - so whoever it tells hears
-    /// about heads in the order they were written.
+    /// Appends a batch to the stream `name`. When the batch names a stream,
+    /// only to that incarnation; when it does not, to whatever stream has the
+    /// name, creating one if none does. A batch the stream has already is not
+    /// written again: the answer is where it landed, with `repeated`.
+    /// `published` runs after the commit of a write, while writes are still
+    /// held back - so whoever it tells hears about heads in the order they
+    /// were written.
     pub fn append(
         &self,
         name: &StreamName,
-        epoch: Epoch,
-        entries: &[Vec<u8>],
-        expect: Option<StreamId>,
+        batch: &Batch,
         published: impl FnOnce(StreamId, u64),
     ) -> Result<Written, AppendError> {
+        let key = batch.key();
+        let epoch = batch.epoch;
         let mut conn = lock(&self.writer);
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = unix_now();
 
-        let stream = match (stream_row(&tx, name)?, expect) {
+        let stream = match (stream_row(&tx, name)?, batch.stream) {
             (Some(stream), Some(expected)) if stream.id != expected => {
                 return Err(AppendError::Replaced { name: name.clone(), expected, current: stream.id });
             }
@@ -254,6 +298,11 @@ impl Store {
                 StreamRow { key: tx.last_insert_rowid(), id, epoch, head: 0, head_hash: chain::genesis(&id) }
             }
         };
+        // Before the epoch: a batch written before the stream moved on is
+        // still written, and its writer is owed the answer it lost.
+        if let Some((first, last)) = landed(&tx, &stream, &key)? {
+            return Ok(Written { stream: stream.id, epoch: stream.epoch, first, last, repeated: true });
+        }
         if epoch < stream.epoch {
             return Err(AppendError::EpochBehind { current: stream.epoch, batch: epoch });
         }
@@ -263,19 +312,29 @@ impl Store {
         {
             let mut insert =
                 tx.prepare_cached("INSERT INTO entries (stream, seq, epoch, hash, data) VALUES (?1, ?2, ?3, ?4, ?5)")?;
-            for data in entries {
+            for data in &batch.entries {
                 seq += 1;
                 let hash = chain::link(&previous, seq, epoch, data);
                 insert.execute(params![stream.key, to_sql(seq), epoch.0, hash.as_bytes(), data])?;
                 previous = hash;
             }
         }
+        tx.execute(
+            "INSERT INTO batches (stream, key, first, last) VALUES (?1, ?2, ?3, ?4)",
+            params![stream.key, key.as_bytes(), to_sql(stream.head + 1), to_sql(seq)],
+        )?;
         tx.execute("UPDATE streams SET updated_at = ?1 WHERE key = ?2", params![now, stream.key])?;
         tx.commit()?;
         published(stream.id, seq);
         drop(conn);
 
-        Ok(Written { stream: stream.id, epoch: epoch.max(stream.epoch), first: stream.head + 1, last: seq })
+        Ok(Written {
+            stream: stream.id,
+            epoch: epoch.max(stream.epoch),
+            first: stream.head + 1,
+            last: seq,
+            repeated: false,
+        })
     }
 
     /// The entries of `name` after `after`, within `limit`.
@@ -456,6 +515,13 @@ fn stream_row(conn: &Connection, name: &StreamName) -> rusqlite::Result<Option<S
         .optional()
 }
 
+/// Where the batch with `key` landed in `stream`, if it is there.
+fn landed(conn: &Connection, stream: &StreamRow, key: &Hash) -> rusqlite::Result<Option<(u64, u64)>> {
+    conn.prepare_cached("SELECT first, last FROM batches WHERE stream = ?1 AND key = ?2")?
+        .query_row(params![stream.key, key.as_bytes()], |row| Ok((from_sql(row.get(0)?), from_sql(row.get(1)?))))
+        .optional()
+}
+
 fn hash_at(conn: &Connection, stream: &StreamRow, seq: u64) -> rusqlite::Result<Option<Hash>> {
     conn.prepare_cached("SELECT hash FROM entries WHERE stream = ?1 AND seq = ?2")?
         .query_row(params![stream.key, to_sql(seq)], |row| hash_column(row.get(0)?))
@@ -519,10 +585,14 @@ mod tests {
 
     const ALL: PageLimit = PageLimit { entries: 1000, bytes: usize::MAX };
 
+    fn batch(epoch: u32, entries: Vec<Vec<u8>>, stream: Option<StreamId>) -> Batch {
+        Batch { epoch: Epoch(epoch), entries, stream }
+    }
+
     #[test]
     fn the_schema_refuses_a_gap() {
         let (_dir, store) = store();
-        store.append(&name("s"), Epoch(1), &[b"a".to_vec()], None, |_, _| {}).unwrap();
+        store.append(&name("s"), &batch(1, vec![b"a".to_vec()], None), |_, _| {}).unwrap();
         let conn = lock(&store.writer);
         let error = conn
             .execute("INSERT INTO entries (stream, seq, epoch, hash, data) VALUES (1, 3, 1, zeroblob(32), x'00')", [])
@@ -533,7 +603,7 @@ mod tests {
     #[test]
     fn the_schema_refuses_an_older_epoch() {
         let (_dir, store) = store();
-        store.append(&name("s"), Epoch(2), &[b"a".to_vec()], None, |_, _| {}).unwrap();
+        store.append(&name("s"), &batch(2, vec![b"a".to_vec()], None), |_, _| {}).unwrap();
         let conn = lock(&store.writer);
         let error = conn
             .execute("INSERT INTO entries (stream, seq, epoch, hash, data) VALUES (1, 2, 1, zeroblob(32), x'00')", [])
@@ -544,7 +614,7 @@ mod tests {
     #[test]
     fn the_schema_refuses_to_change_or_delete_an_entry() {
         let (_dir, store) = store();
-        store.append(&name("s"), Epoch(1), &[b"a".to_vec()], None, |_, _| {}).unwrap();
+        store.append(&name("s"), &batch(1, vec![b"a".to_vec()], None), |_, _| {}).unwrap();
         let conn = lock(&store.writer);
         let error = conn.execute("UPDATE entries SET data = x'01'", []).unwrap_err();
         assert!(error.to_string().contains("cannot be changed"), "{error}");
@@ -556,21 +626,23 @@ mod tests {
     fn a_writer_that_expects_a_stream_never_creates_one() {
         let (_dir, store) = store();
         let expected = StreamId::from_bytes([1; 16]);
-        let refused = store.append(&name("s"), Epoch(1), &[b"a".to_vec()], Some(expected), |_, _| {});
+        let refused = store.append(&name("s"), &batch(1, vec![b"a".to_vec()], Some(expected)), |_, _| {});
         assert!(matches!(refused, Err(AppendError::NotFound { .. })), "{refused:?}");
         assert!(store.streams().unwrap().is_empty(), "a refused batch created a stream");
 
-        let created = store.append(&name("s"), Epoch(1), &[b"a".to_vec()], None, |_, _| {}).unwrap();
-        let refused = store.append(&name("s"), Epoch(1), &[b"b".to_vec()], Some(expected), |_, _| {});
+        let created = store.append(&name("s"), &batch(1, vec![b"a".to_vec()], None), |_, _| {}).unwrap();
+        let refused = store.append(&name("s"), &batch(1, vec![b"b".to_vec()], Some(expected)), |_, _| {});
         assert!(matches!(refused, Err(AppendError::Replaced { .. })), "{refused:?}");
-        let written = store.append(&name("s"), Epoch(1), &[b"b".to_vec()], Some(created.stream), |_, _| {}).unwrap();
+        let written =
+            store.append(&name("s"), &batch(1, vec![b"b".to_vec()], Some(created.stream)), |_, _| {}).unwrap();
         assert_eq!(written.first, 2);
     }
 
     #[test]
     fn the_head_moves_with_the_entries() {
         let (_dir, store) = store();
-        let written = store.append(&name("s"), Epoch(1), &[b"ab".to_vec(), b"cde".to_vec()], None, |_, _| {}).unwrap();
+        let written =
+            store.append(&name("s"), &batch(1, vec![b"ab".to_vec(), b"cde".to_vec()], None), |_, _| {}).unwrap();
         assert_eq!((written.first, written.last), (1, 2));
         let summary = &store.streams().unwrap()[0];
         assert_eq!((summary.head, summary.bytes), (2, 5));
@@ -583,11 +655,89 @@ mod tests {
     fn a_page_keeps_to_its_byte_budget_but_never_comes_back_empty() {
         let (_dir, store) = store();
         let big = vec![0u8; 100];
-        store.append(&name("s"), Epoch(1), &[big.clone(), big.clone(), big], None, |_, _| {}).unwrap();
+        store.append(&name("s"), &batch(1, vec![big.clone(), big.clone(), big], None), |_, _| {}).unwrap();
         let page = store.read(&name("s"), None, PageLimit { entries: 10, bytes: 250 }).unwrap();
         assert_eq!(page.entries.len(), 2);
         let page = store.read(&name("s"), None, PageLimit { entries: 10, bytes: 10 }).unwrap();
         assert_eq!(page.entries.len(), 1);
+    }
+
+    #[test]
+    fn a_batch_sent_again_lands_once() {
+        let (_dir, store) = store();
+        let first = store.append(&name("s"), &batch(1, vec![b"a".to_vec(), b"b".to_vec()], None), |_, _| {}).unwrap();
+        assert!(!first.repeated);
+        let mut published = false;
+        let again =
+            store.append(&name("s"), &batch(1, vec![b"a".to_vec(), b"b".to_vec()], None), |_, _| published = true);
+        assert_eq!(again.unwrap(), Written { repeated: true, ..first });
+        assert!(!published, "a repeat moved no head, and woke nobody");
+        assert_eq!(store.streams().unwrap()[0].head, 2);
+
+        // Moved on since: an epoch above it, other batches after it.
+        store.append(&name("s"), &batch(3, vec![b"c".to_vec()], Some(first.stream)), |_, _| {}).unwrap();
+        let late =
+            store.append(&name("s"), &batch(1, vec![b"a".to_vec(), b"b".to_vec()], Some(first.stream)), |_, _| {});
+        assert_eq!(late.unwrap(), Written { epoch: Epoch(3), repeated: true, ..first });
+        assert_eq!(store.streams().unwrap()[0].head, 3);
+    }
+
+    #[test]
+    fn the_schema_holds_a_batch_once_where_it_landed() {
+        let (_dir, store) = store();
+        let written = store.append(&name("s"), &batch(1, vec![b"a".to_vec()], None), |_, _| {}).unwrap();
+        let key = batch(1, vec![b"a".to_vec()], None).key();
+        let conn = lock(&store.writer);
+        let insert = |key: &[u8], first: u64, last: u64| {
+            conn.execute(
+                "INSERT INTO batches (stream, key, first, last) VALUES (1, ?1, ?2, ?3)",
+                params![key, to_sql(first), to_sql(last)],
+            )
+        };
+        let error = insert(&[7; 32], written.first, written.last).unwrap_err();
+        assert!(error.to_string().contains("overlap"), "{error}");
+        // What code that forgot to look would do: write the batch's entries
+        // again, then record it.
+        conn.execute("INSERT INTO entries (stream, seq, epoch, hash, data) VALUES (1, 2, 1, zeroblob(32), x'61')", [])
+            .unwrap();
+        let error = insert(key.as_bytes(), 2, 2).unwrap_err();
+        assert!(error.to_string().contains("UNIQUE"), "{error}");
+        let error = insert(&[7; 32], 2, 3).unwrap_err();
+        assert!(error.to_string().contains("end at the head"), "{error}");
+        let error = conn.execute("UPDATE batches SET last = 5", []).unwrap_err();
+        assert!(error.to_string().contains("cannot be changed"), "{error}");
+        let error = conn.execute("DELETE FROM batches", []).unwrap_err();
+        assert!(error.to_string().contains("cannot be deleted"), "{error}");
+    }
+
+    #[test]
+    fn a_relay_of_the_previous_release_is_carried_forward() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = StreamId::from_bytes([5; 16]);
+        let link = chain::link(&chain::genesis(&id), 1, Epoch(1), b"old");
+        {
+            let mut conn = Connection::open(dir.path().join(DATABASE_FILE)).unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute_batch(MIGRATIONS[0]).unwrap();
+            tx.pragma_update(None, "user_version", 1).unwrap();
+            tx.execute(
+                "INSERT INTO streams (name, id, epoch, head_hash, created_at, updated_at) VALUES ('s', ?1, 1, ?2, 0, 0)",
+                params![id.as_bytes(), chain::genesis(&id).as_bytes()],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO entries (stream, seq, epoch, hash, data) VALUES (1, 1, 1, ?1, x'6f6c64')",
+                [link.as_bytes()],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(store.read(&name("s"), None, ALL).unwrap().entries[0].data, b"old");
+        let written = store.append(&name("s"), &batch(1, vec![b"new".to_vec()], Some(id)), |_, _| {}).unwrap();
+        assert_eq!((written.first, written.last), (2, 2));
+        let again = store.append(&name("s"), &batch(1, vec![b"new".to_vec()], Some(id)), |_, _| {}).unwrap();
+        assert_eq!(again, Written { repeated: true, ..written });
     }
 
     #[test]

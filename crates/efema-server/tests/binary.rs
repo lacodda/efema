@@ -153,6 +153,8 @@ async fn the_relay_never_logs_what_it_keeps() {
     let served = serve_logging(dir.path(), "trace");
     let marker = b"ENTRY-BYTES-that-no-log-line-may-show";
     write(&served.base, "notes", &[marker, marker]).await;
+    // Sent again, as after a lost answer: known, and not written - nor logged.
+    write(&served.base, "notes", &[marker, marker]).await;
     read(&served.base, "notes").await;
     // A body that is not a batch is refused - and the refusal does not echo
     // it back into the log either.
@@ -167,7 +169,10 @@ async fn the_relay_never_logs_what_it_keeps() {
 
     let log = served.log().join("\n");
     // A check that finds nothing in an empty log proves nothing.
-    assert!(log.contains("notes: wrote 2 entries") && log.contains("400"), "the log was not captured:\n{log}");
+    assert!(
+        log.contains("notes: wrote 2 entries") && log.contains("sent again") && log.contains("400"),
+        "the log was not captured:\n{log}"
+    );
     let hex: String = marker.iter().map(|b| format!("{b:02x}")).collect();
     let listed = marker[..8].iter().map(u8::to_string).collect::<Vec<_>>().join(", ");
     for (form, needle) in

@@ -473,9 +473,12 @@ async fn a_lock_the_key_did_not_seal_moves_nothing() {
 
     // The relay - or anyone who can write to it - hands the stream's first
     // lock in again: a real entry of the key, from an older generation. It
-    // does not take the stream back to the old passphrase.
-    let write = |entry: Vec<u8>| efema::wire::Batch { epoch: Epoch(1), entries: vec![entry], stream: None };
-    relay.transport().append(&name("notes"), &write(first)).await.unwrap();
+    // does not take the stream back to the old passphrase. Twice, in one
+    // batch: alone, it would be the stream's first batch over again, which
+    // the relay knows and does not write twice.
+    let write = |entries: Vec<Vec<u8>>| efema::wire::Batch { epoch: Epoch(1), entries, stream: None };
+    let replayed = relay.transport().append(&name("notes"), &write(vec![first.clone(), first])).await.unwrap();
+    assert!(!replayed.repeated);
     let reader = Device::new();
     let on_reader = reader.try_open(relay.transport(), "notes", 1, Secret::Passphrase(NEW_PASSPHRASE)).await.unwrap();
     drain(&on_reader).await;
@@ -488,9 +491,9 @@ async fn a_lock_the_key_did_not_seal_moves_nothing() {
     let mut forged = changed.clone();
     let last = forged.len() - 1;
     forged[last] ^= 1;
-    relay.transport().append(&name("notes"), &write(forged)).await.unwrap();
+    let at = relay.transport().append(&name("notes"), &write(vec![forged])).await.unwrap().first;
     let refused = client.pull().await.unwrap_err();
-    assert!(matches!(refused, Error::Inauthentic { seq: 4, .. }), "{refused:?}");
+    assert!(matches!(refused, Error::Inauthentic { seq, .. } if seq == at), "{refused:?}");
     assert_eq!(client.passphrase_changes(), 1);
 }
 

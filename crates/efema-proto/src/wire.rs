@@ -17,6 +17,7 @@ use std::str::FromStr;
 use minicbor::decode::{Decoder, Error as DecodeError};
 use minicbor::encode::{Encoder, Error as EncodeError, Write};
 use minicbor::{Decode, Encode};
+use sha2::{Digest, Sha256};
 
 use crate::{Cursor, Epoch, Hash, StreamId, StreamName};
 
@@ -25,6 +26,12 @@ use crate::{Cursor, Epoch, Hash, StreamId, StreamName};
 /// The relay gives the entries consecutive positions or none at all: a batch
 /// is never half written, and no other writer's entry lands between two
 /// entries of one batch.
+///
+/// A batch is known by what it holds - its [`key`](Batch::key). Sent again to
+/// a stream that already has it, it is not written a second time: the answer
+/// says where it landed the first time. So a writer whose answer was lost on
+/// the way back sends the same batch again, byte for byte, and the stream
+/// holds it once.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 #[cbor(map)]
 pub struct Batch {
@@ -47,6 +54,35 @@ pub struct Batch {
     pub stream: Option<StreamId>,
 }
 
+/// Domain separation for a batch's key: no other SHA-256 input in efema
+/// starts with these bytes.
+const BATCH_DOMAIN: &[u8] = b"efema/batch/v1";
+
+impl Batch {
+    /// What the batch is known by: SHA-256 over its epoch and its entries,
+    /// each length-prefixed, so no two different batches feed the hash the
+    /// same bytes - moving a byte from one entry to the next changes the
+    /// input rather than reshuffling it.
+    ///
+    /// The stream the batch names is not in it: a batch is the same batch
+    /// whether its first sending created the stream or named it.
+    ///
+    /// ```text
+    /// key = SHA-256("efema/batch/v1" || epoch: u32 || count: u64 || (length(data): u64 || data) for each entry)
+    /// ```
+    pub fn key(&self) -> Hash {
+        let mut hasher = Sha256::new();
+        hasher.update(BATCH_DOMAIN);
+        hasher.update(self.epoch.0.to_be_bytes());
+        hasher.update((self.entries.len() as u64).to_be_bytes());
+        for data in &self.entries {
+            hasher.update((data.len() as u64).to_be_bytes());
+            hasher.update(data);
+        }
+        Hash::from_bytes(hasher.finalize().into())
+    }
+}
+
 /// The answer to a write: where the batch landed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 #[cbor(map)]
@@ -64,6 +100,16 @@ pub struct Written {
     /// The position of the batch's last entry.
     #[n(3)]
     pub last: u64,
+    /// Whether the stream had this batch already, and nothing was written
+    /// now: the positions are where it landed the first time. On the wire
+    /// only when true.
+    #[n(4)]
+    #[cbor(skip_if = "is_false")]
+    pub repeated: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// The answer to a read: the entries after the cursor, in order.
@@ -438,6 +484,47 @@ mod tests {
         expected.extend_from_slice(b"0123456789abcdef");
         assert_eq!(encode(&batch), expected);
         assert_eq!(decode::<Batch>(&expected).unwrap(), batch);
+    }
+
+    // Frozen values, computed outside Rust (Python's hashlib over the same
+    // byte layout). A relay keeps the keys of the batches it wrote; a change
+    // here makes every batch sent again after an upgrade land twice, so it is
+    // a new protocol version, not a fix.
+    #[test]
+    fn the_batch_key_is_frozen() {
+        let batch = |epoch, entries: &[&[u8]]| Batch {
+            epoch: Epoch(epoch),
+            entries: entries.iter().map(|e| e.to_vec()).collect(),
+            stream: None,
+        };
+        let key = batch(1, &[b"hello", b""]).key();
+        assert_eq!(key.to_string(), "4ba9b77af7cf7cca7343bb1a0a429ea31dab2b745ca3999908c1be168e8a98fc");
+        assert_eq!(
+            batch(1, &[b"hel", b"lo"]).key().to_string(),
+            "2a371f288c3417da02122d1ca0e97fe8779f9da7266d959fb6ce9b71659aee76",
+            "entry boundaries are part of the key"
+        );
+        assert_eq!(
+            batch(2, &[b"hello", b""]).key().to_string(),
+            "61cf1033ed28c74426786ffa3a7afaecd765381d57c7633dc7b3cbcfe86244ab",
+            "the epoch is part of the key"
+        );
+        let named = Batch { stream: Some(stream()), ..batch(1, &[b"hello", b""]) };
+        assert_eq!(named.key(), key, "the stream a batch names is not part of it");
+    }
+
+    #[test]
+    fn a_repeat_is_said_only_when_it_is_one() {
+        let written = Written { stream: stream(), epoch: Epoch(1), first: 1, last: 2, repeated: false };
+        let plain = encode(&written);
+        // {0: h'..', 1: 1, 2: 1, 3: 2}: four keys, no fifth.
+        assert_eq!(plain[0], 0xa4);
+        assert_eq!(decode::<Written>(&plain).unwrap(), written);
+        let again = Written { repeated: true, ..written };
+        let bytes = encode(&again);
+        assert_eq!(bytes[0], 0xa5);
+        assert_eq!(&bytes[bytes.len() - 2..], [0x04, 0xf5], "key 4, true");
+        assert_eq!(decode::<Written>(&bytes).unwrap(), again);
     }
 
     #[test]

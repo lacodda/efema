@@ -51,6 +51,38 @@ whatever stream has the name, and creates the stream if none does: that is how
 a stream's first batch is written, and the only batch a client sends without
 it.
 
+The body is read to its end before anything is written: a connection torn
+partway through a batch writes none of it.
+
+### Sending a batch again
+
+A batch is known by what it holds - its [key](#the-batch-key). A batch the
+stream already has is not written again: the answer is the
+[written](#written) record of where it landed the first time, with `repeated`
+set. So a writer whose answer was lost - the connection torn after the relay
+wrote the batch - sends the same batch again, byte for byte, and the stream
+holds it once. Nothing has to be kept for this beyond the batch itself.
+
+A repeat is known for as long as the stream exists - not for a while - and
+before the epoch is checked: a batch written before the stream moved to a
+newer epoch is still answered. It is not known across incarnations: the
+stream it names must still be the one it went into.
+
+The same entries in another epoch, or cut into batches differently, are
+another batch. A writer that means two equal batches - the same bytes, twice -
+cannot have them: in efema every entry is sealed with a random nonce, so no two
+batches a client writes are equal.
+
+### The batch key
+
+```
+key = SHA-256("efema/batch/v1" || epoch: u32 || count: u64 || (length(data): u64 || data) for each entry)
+```
+
+Integers are big-endian; `count` is the number of entries. The stream the
+batch names is not part of it. A relay keeps the key of every batch it writes,
+so the formula cannot change within a protocol version.
+
 ### batch
 
 | Key | Field | Type | Meaning |
@@ -67,6 +99,7 @@ it.
 | 1 | `epoch` | uint | the stream's epoch after the write |
 | 2 | `first` | uint | the position of the batch's first entry |
 | 3 | `last` | uint | the position of its last entry |
+| 4 | `repeated` | bool, optional | `true` when the stream had this batch already and nothing was written now; absent otherwise |
 
 ## Reading: `GET /v1/streams/{name}/entries`
 

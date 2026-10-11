@@ -350,6 +350,21 @@ fn the_documented_chain_is_the_implemented_one() {
 }
 
 #[test]
+fn the_documented_batch_key_is_the_implemented_one() {
+    // Every relay keeps the keys of the batches it wrote, and a transport
+    // without a relay (S3) computes them itself: the formula is a contract.
+    let domain = "efema/batch/v1";
+    assert!(read("crates/efema-proto/src/wire.rs").contains(&format!("b\"{domain}\"")), "the batch key's domain moved");
+    let page = read("docs/src/content/docs/reference/protocol.md");
+    assert!(
+        page.contains(&format!(
+            "SHA-256(\"{domain}\" || epoch: u32 || count: u64 || (length(data): u64 || data) for each entry)"
+        )),
+        "the protocol page's batch key is not the one in efema-proto"
+    );
+}
+
+#[test]
 fn every_crate_is_published_in_dependency_order() {
     let publish = read(".github/workflows/publish.yml");
     let line = publish.lines().find(|l| l.trim().starts_with("for crate in ")).expect("publish.yml loops over crates");

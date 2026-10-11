@@ -109,6 +109,72 @@ async fn concurrent_writers_get_one_order_with_no_gaps_and_whole_batches() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_batch_sent_again_is_answered_where_it_landed() {
+    let relay = TestRelay::start().await;
+    let first = relay.write("s", 1, &[b"a", b"b"]).await.unwrap();
+    assert!(!first.repeated);
+    let again = relay.write("s", 1, &[b"a", b"b"]).await.unwrap();
+    assert_eq!(again, efema_proto::wire::Written { repeated: true, ..first });
+
+    // Not the same batch: other entries, other boundaries, another epoch.
+    for (epoch, entries) in [(1, vec![b"a".as_slice()]), (1, vec![b"ab".as_slice()]), (2, vec![b"a", b"b"])] {
+        assert!(!relay.write("s", epoch, &entries).await.unwrap().repeated, "{entries:?} in epoch {epoch}");
+    }
+    // Still known after other batches, and after the stream moved to an
+    // epoch above it.
+    let late = relay.write_to("s", first.stream, 1, &[b"a", b"b"]).await.unwrap();
+    assert_eq!((late.first, late.last, late.repeated, late.epoch), (1, 2, true, Epoch(2)));
+    let entries = relay.read_all("s", None, 100).await;
+    assert_eq!(entries.len(), 2 + 1 + 1 + 2, "a repeat was written");
+
+    // Into another incarnation than the one it names, a repeat is refused like
+    // any batch.
+    let refused = relay.write_to("s", StreamId::from_bytes([9; 16]), 1, &[b"a", b"b"]).await.unwrap_err();
+    assert_eq!(refused.problem.code, ProblemCode::StreamReplaced);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_same_batch_sent_at_once_lands_once() {
+    let relay = std::sync::Arc::new(TestRelay::start().await);
+    relay.write("s", 1, &[b"before"]).await.unwrap();
+    let tasks: Vec<_> = (0..16)
+        .map(|_| {
+            let relay = relay.clone();
+            tokio::spawn(async move { relay.write("s", 1, &[b"once", b"only"]).await.unwrap() })
+        })
+        .collect();
+    let mut answers = Vec::new();
+    for task in tasks {
+        answers.push(task.await.unwrap());
+    }
+    assert_eq!(answers.iter().filter(|w| !w.repeated).count(), 1, "{answers:?}");
+    assert!(answers.iter().all(|w| (w.first, w.last) == (2, 3)), "{answers:?}");
+    assert_eq!(relay.read_all("s", None, 100).await.len(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_batch_torn_on_its_way_in_writes_nothing() {
+    let relay = TestRelay::start().await;
+    let tear = lacodda_tear::Tear::start(relay.addr).await.unwrap();
+    // Through the headers and into the body.
+    tear.cut(lacodda_tear::Cut::Up(1_000));
+    let batch = Batch { epoch: Epoch(1), entries: vec![vec![7u8; 50_000]], stream: None };
+    let torn = relay
+        .client
+        .post(format!("http://{}/v1/streams/s/entries", tear.addr()))
+        .header("content-type", efema_proto::MEDIA_TYPE)
+        .body(wire::encode(&batch))
+        .send()
+        .await;
+    assert!(torn.is_err(), "the request went through: {torn:?}");
+    assert_eq!(tear.torn(), 1);
+    // Not half a batch, and not a stream created for it either.
+    let refused = relay.read("s", None, None).await.unwrap_err();
+    assert_eq!(refused.problem.code, ProblemCode::StreamNotFound);
+    assert!(!relay.write_raw("s", wire::encode(&batch)).await.unwrap().repeated);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn two_readers_with_different_pages_see_one_sequence() {
     let relay = TestRelay::start().await;
     for i in 0..50u32 {
@@ -129,9 +195,9 @@ async fn a_page_ends_at_its_byte_budget_and_still_carries_a_huge_entry() {
     let relay = TestRelay::start().await;
     // Each batch stays under the body limit; together they pass the page's
     // byte budget, so one read cannot carry them all.
-    let chunk = vec![7u8; 3 * 1024 * 1024];
-    for _ in 0..4 {
-        relay.write("big", 1, &[&chunk]).await.unwrap();
+    // Each one different: the same batch twice is one batch.
+    for fill in 0..4u8 {
+        relay.write("big", 1, &[&vec![fill; 3 * 1024 * 1024]]).await.unwrap();
     }
     let page = relay.read("big", None, None).await.unwrap();
     assert!(page.entries.len() < 4, "8 MiB of budget cannot hold 12 MiB");

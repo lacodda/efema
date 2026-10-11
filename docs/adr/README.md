@@ -17,4 +17,5 @@ earlier one says so; the earlier one is marked superseded rather than deleted.
 | [0010](0010-the-client-library.md) | The client - async, at least once, and a writer names its stream | Accepted |
 | [0011](0011-compressed-before-sealed.md) | Items are compressed before they are sealed, with a codec byte of their own | Accepted |
 | [0012](0012-a-changed-passphrase-is-a-new-lock.md) | A changed passphrase is a new lock of the same key, sealed by the key | Accepted |
+| [0013](0013-a-batch-is-known-by-what-it-holds.md) | A batch is known by what it holds, and written once | Accepted |
 | [0015](0015-lacodda-tear-in-this-workspace.md) | lacodda-tear - torn connections for tests - lives here, with a version of its own | Accepted |

@@ -9,7 +9,9 @@
 //!
 //! Bodies are CBOR (`efema_proto::wire`), errors included. Nothing here reads
 //! entry data: a batch is decoded into a list of byte strings, and those bytes
-//! go to the store as they came.
+//! go to the store as they came. A batch arrives whole or not at all - the
+//! body is read to its end before it is decoded - so a connection torn in
+//! the middle of one writes nothing.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -75,11 +77,7 @@ async fn write(
     let written = blocking({
         let shared = shared.clone();
         let name = name.clone();
-        move || {
-            shared.store.append(&name, batch.epoch, &batch.entries, batch.stream, |id, head| {
-                shared.heads.publish(&name, id, head)
-            })
-        }
+        move || shared.store.append(&name, &batch, |id, head| shared.heads.publish(&name, id, head))
     })
     .await?
     .map_err(|e| match e {
@@ -101,7 +99,15 @@ async fn write(
     } else {
         format!("{}..{}", written.first, written.last)
     };
-    info!("{name}: wrote {count} {} ({size} bytes) at {at}, epoch {epoch}", plural(count, "entry", "entries"));
+    if written.repeated {
+        // The writer did not hear the first answer; nothing is written now.
+        info!(
+            "{name}: {count} {} ({size} bytes) sent again, written before at {at}",
+            plural(count, "entry", "entries")
+        );
+    } else {
+        info!("{name}: wrote {count} {} ({size} bytes) at {at}, epoch {epoch}", plural(count, "entry", "entries"));
+    }
     Ok(cbor(StatusCode::OK, wire::encode(&written)))
 }
 
