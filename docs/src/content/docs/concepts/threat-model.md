@@ -123,6 +123,10 @@ Accidents, mostly - the kind that happen to honest operators:
   version from mixing its entries in after a newer one moved the stream on.
 - **A crash or a power cut mid-write**: a batch is committed whole, and an
   acknowledged write is on disk before the device hears about it.
+- **A connection torn mid-write, or an answer lost on its way back**: a batch
+  is read whole before any of it is written, and a batch sent again is known
+  by what it holds and answered rather than written twice. The device keeps
+  what it pushed - sealed - until the relay has it.
 - **A relay that hands out a broken history**: the client recomputes every
   link as it reads, and stops at the first one that does not follow.
 
@@ -135,18 +139,24 @@ a test that stays green with the property gone proves nothing.
 
 | Promise | Shown by |
 | --- | --- |
-| The relay's database, its write-ahead log and everything logged in the process at every level hold no item, passphrase, key or device identity in the clear - after every way a client writes: a new stream, pushes compressed and not, a changed passphrase, a second device joining and writing. Compression is off for the marker, so what hides it has to be the seal. A device's own state holds none of them either. | `nothing_the_relay_keeps_or_logs_is_plaintext` ([crates/efema/tests/client.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/client.rs)) |
-| The relay, run as an operator runs it, logs no entry's bytes - as text, in hex or as numbers - at its most verbose level, refusals included. | `the_relay_never_logs_what_it_keeps` ([crates/efema-server/tests/binary.rs](https://github.com/lacodda/efema/blob/main/crates/efema-server/tests/binary.rs)) |
+| The relay's database, its write-ahead log and everything logged in the process at every level hold no item, passphrase, key or device identity in the clear - after every way a client writes: a new stream, pushes compressed and not, a changed passphrase, a second device joining and writing. Compression is off for the marker, so what hides it has to be the seal. A device's own state holds none of them either - with an item waiting in it to be sent. | `nothing_the_relay_keeps_or_logs_is_plaintext` ([crates/efema/tests/client.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/client.rs)) |
+| The relay, run as an operator runs it, logs no entry's bytes - as text, in hex or as numbers - at its most verbose level, refusals and repeats included. | `the_relay_never_logs_what_it_keeps` ([crates/efema-server/tests/binary.rs](https://github.com/lacodda/efema/blob/main/crates/efema-server/tests/binary.rs)) |
 | An altered entry is refused, whether the relay leaves the chain as it was or computes it anew. | `a_relay_cannot_alter_an_entry_unnoticed` ([crates/efema/tests/client.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/client.rs)) |
 | An entry no client wrote is refused, not skipped. | `an_entry_no_client_wrote_is_refused_not_skipped` ([crates/efema/tests/client.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/client.rs)) |
 | A relabelled epoch does not open. | `an_entry_opens_in_its_epoch_only` ([crates/efema/src/envelope.rs](https://github.com/lacodda/efema/blob/main/crates/efema/src/envelope.rs)) |
 | A changed passphrase holds on every device, and a joining device opens with it. | `a_changed_passphrase_holds_on_every_device` ([crates/efema/tests/client.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/client.rs)) |
 | A lock the key did not seal is refused, and an old one written again moves no device back. | `a_lock_the_key_did_not_seal_moves_nothing` ([crates/efema/tests/client.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/client.rs)) |
+| A batch torn on its way to the relay is not written, not even in part, and goes again whole. | `a_batch_torn_on_its_way_up_is_not_written_and_goes_again_whole` ([crates/efema/tests/torn.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/torn.rs)), `a_batch_torn_on_its_way_in_writes_nothing` ([crates/efema-server/tests/relay.rs](https://github.com/lacodda/efema/blob/main/crates/efema-server/tests/relay.rs)) |
+| A batch whose answer was lost is not written twice when it is sent again - nor when it is sent many times at once. | `an_answer_lost_on_its_way_back_does_not_write_the_batch_twice` ([crates/efema/tests/torn.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/torn.rs)), `the_same_batch_sent_at_once_lands_once` ([crates/efema-server/tests/relay.rs](https://github.com/lacodda/efema/blob/main/crates/efema-server/tests/relay.rs)) |
+| What a device pushed outlives the network going and the app closing, and goes once both are back. | `what_waits_outlives_the_app_closing` ([crates/efema/tests/torn.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/torn.rs)) |
+| A push torn partway resumes where it stopped, and a torn read from the acknowledged cursor. | `a_long_push_resumes_where_it_stopped`, `a_pull_torn_partway_resumes_from_the_acknowledged_cursor` ([crates/efema/tests/torn.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/torn.rs)) |
 | A compressed frame that claims more than any item may be is refused before it is expanded. | `a_frame_that_lies_about_its_size_is_refused` ([crates/efema/src/envelope.rs](https://github.com/lacodda/efema/blob/main/crates/efema/src/envelope.rs)) |
 | The formats are the ones on the [Sealing](/efema/concepts/sealing/) page, frozen against bytes computed outside the code. | `the_formats_are_frozen` ([crates/lacodda-seal/src/lib.rs](https://github.com/lacodda/efema/blob/main/crates/lacodda-seal/src/lib.rs)), `the_sealing_page_gives_the_formats_the_code_writes` ([crates/efema/tests/sealing_page.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/sealing_page.rs)) |
 
-What no test here shows: that an acknowledged write survives a power cut
-(SQLite's `synchronous=FULL` is set; showing it takes pulling a plug), and
-what a relay does with a connection torn in the middle of a batch - the
-transaction keeps a batch whole, and tests against torn connections come
-with offline queues in 0.4.0.
+Connections in these tests are torn by a proxy between the client and the
+relay ([lacodda-tear](https://crates.io/crates/lacodda-tear)) - partway up a
+request, before or partway down an answer, or all at once - and the relay
+then asked around it what it holds. What no test here shows: that an
+acknowledged write survives a power cut (SQLite's `synchronous=FULL` is set,
+on the relay and in the device's state; showing it takes pulling a plug), and
+a real mobile network - that is a criterion of 1.0, not a test.

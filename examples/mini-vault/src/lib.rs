@@ -106,8 +106,12 @@ impl<T: Transport> Vault<T> {
         &self.client
     }
 
-    /// Reads the stream, then sends what changed here.
+    /// Sends what an earlier sync left waiting, reads the stream, then sends
+    /// what changed here.
     pub async fn sync(&mut self) -> Result<Summary> {
+        // Changes a torn connection left on this device go first, in their
+        // place before anything changed since.
+        self.client.send().await?;
         let mut summary = self.pull().await?;
         summary.pushed = self.push().await?;
         Ok(summary)
@@ -163,12 +167,18 @@ impl<T: Transport> Vault<T> {
         }
         let items: Vec<Vec<u8>> =
             changes.iter().map(|c| minicbor::to_vec(c).expect("encoding into a vector")).collect();
-        self.client.push(&items).await?;
-        for (path, hash) in flying {
-            self.held.remove(&path);
-            self.in_flight.insert(path, hash);
+        let sent = self.client.push(&items).await;
+        // Kept by the client either way - sent now, or left waiting on this
+        // device for the next sync: in flight from here, so the next scan
+        // does not send them a second time.
+        if matches!(sent, Ok(_) | Err(efema::Error::Unsent { .. })) {
+            for (path, hash) in flying {
+                self.held.remove(&path);
+                self.in_flight.insert(path, hash);
+            }
+            self.save()?;
         }
-        self.save()?;
+        sent?;
         Ok(changes.len())
     }
 

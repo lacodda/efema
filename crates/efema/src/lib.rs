@@ -14,10 +14,12 @@
 //! # The pieces
 //!
 //! - [`State`] - what a device remembers between runs: its identity, and for
-//!   each stream the cursor and the locked key. One file per device.
+//!   each stream the cursor, the locked key and what waits to be sent. One
+//!   file per device.
 //! - [`Relay`] - the relay to talk to; it implements [`Transport`].
 //! - [`Client`] - one device's view of one stream: [`push`](Client::push),
-//!   [`pull`](Client::pull), [`ack`](Client::ack), [`wait`](Client::wait),
+//!   [`send`](Client::send), [`pull`](Client::pull), [`ack`](Client::ack),
+//!   [`wait`](Client::wait),
 //!   [`change_passphrase`](Client::change_passphrase), and
 //!   [`doctor`](Client::doctor) to report on all of it.
 //!
@@ -42,10 +44,18 @@
 //!
 //! # Delivery
 //!
-//! At least once. [`Client::pull`] reads from the device's acknowledged
-//! cursor and [`Client::ack`] moves it, once the app has applied what it
-//! pulled - so a crash in between hands the same entries over again, and an
-//! app applies an entry twice without harm.
+//! Reading is at least once. [`Client::pull`] reads from the device's
+//! acknowledged cursor and [`Client::ack`] moves it, once the app has applied
+//! what it pulled - so a crash in between hands the same entries over again,
+//! and an app applies an entry twice without harm.
+//!
+//! Writing is exactly once. [`Client::push`] keeps what it seals in the
+//! device's state, cut into the batches it will be sent as, before it sends
+//! anything; a batch leaves the device when the relay has it. A torn
+//! connection, a relay that is down, the app closing: the batches wait, and
+//! go with the next push or [`Client::send`] - [`Error::Unsent`] says how
+//! many wait. A batch whose answer was lost goes again byte for byte, and the
+//! relay, which knows a batch by what it holds, does not write it twice.
 //!
 //! # Epochs
 //!
@@ -63,14 +73,14 @@ mod relay;
 mod state;
 mod transport;
 
-pub use client::{Client, Pulled, Pushed, Received, Secret};
-pub use doctor::{KeyReport, RelayReport, Report};
+pub use client::{Client, Pulled, Received, Secret, Sent};
+pub use doctor::{KeyReport, QUEUE_STALE, RelayReport, Report};
 pub use efema_proto::{Cursor, Epoch, StreamId, StreamName};
 pub use envelope::{Compression, ENTRY_OVERHEAD};
 pub use error::Error;
 pub use lacodda_seal::{Key, KeyId, LockedKey};
 pub use relay::{InvalidUrl, Relay};
-pub use state::{DeviceId, State};
+pub use state::{DeviceId, Queue, State};
 pub use transport::{Limits, Transport, TransportError};
 
 /// The wire format and the hash chain, for writing a [`Transport`].

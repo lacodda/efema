@@ -22,4 +22,5 @@ tokio.workspace = true
 
 [dev-dependencies]
 efema-server.workspace = true
+lacodda-tear.workspace = true
 tempfile.workspace = true

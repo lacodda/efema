@@ -83,14 +83,26 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Sync { once } => {
             let mut vault = Vault::open(client, &cli.folder, &cli.state.join("index"))?;
             loop {
-                report(&vault.sync().await?);
+                match vault.sync().await {
+                    Ok(summary) => report(&summary),
+                    Err(e) if once => return Err(e),
+                    // The network comes and goes; what was not sent waits on
+                    // this device, and the next round sends it.
+                    Err(e) => eprintln!("sync stopped: {e:#} - trying again"),
+                }
                 if once {
                     return Ok(());
                 }
                 // Woken at once by the relay when another device writes; the
-                // timeout is how often local changes are looked for.
+                // timeout is how often local changes are looked for. A relay
+                // that cannot be reached is tried again after a pause.
+                let pause = async {
+                    if vault.client().wait(Duration::from_secs(5)).await.is_err() {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                };
                 tokio::select! {
-                    woke = vault.client().wait(Duration::from_secs(5)) => { woke?; }
+                    () = pause => {}
                     _ = tokio::signal::ctrl_c() => return Ok(()),
                 }
             }

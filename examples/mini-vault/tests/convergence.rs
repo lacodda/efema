@@ -1,10 +1,12 @@
 //! The orderings two processes cannot be made to hit on cue - both devices
-//! sending before either reads - driven step by step through the library.
+//! sending before either reads, an answer lost on its way back - driven step
+//! by step through the library.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use efema::{Client, Epoch, Relay, Secret, State};
+use efema::{Client, Epoch, Relay, Secret, State, Transport};
+use lacodda_tear::{Cut, Tear};
 use mini_vault::Vault;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
@@ -16,7 +18,17 @@ struct Device {
 
 impl Device {
     async fn open(url: &str) -> Self {
-        let root = tempfile::tempdir().unwrap();
+        Self::open_in(tempfile::tempdir().unwrap(), url).await
+    }
+
+    /// The same device after the app closed and started again.
+    async fn restart(self, url: &str) -> Self {
+        let Self { root, vault } = self;
+        drop(vault);
+        Self::open_in(root, url).await
+    }
+
+    async fn open_in(root: TempDir, url: &str) -> Self {
         let state = State::open(root.path().join("sync.sqlite3")).unwrap();
         let client = Client::open(
             Relay::new(url).unwrap(),
@@ -145,4 +157,27 @@ async fn three_devices_converge() {
     for version in ["a", "b", "c", "c alone"] {
         assert!(contents.contains(version), "{version} was lost: {files:?}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_change_whose_answer_was_lost_arrives_once_after_a_restart() {
+    let (url, _stop, _dir) = relay().await;
+    let tear = Tear::start(url.trim_start_matches("http://").parse().unwrap()).await.unwrap();
+    let through = format!("http://{}", tear.addr());
+    let (mut a, mut b) = (Device::open(&through).await, Device::open(&url).await);
+
+    a.write("trip.md", "written on a train");
+    a.vault.pull().await.unwrap();
+    // The relay takes the change; its answer never reaches the device, and
+    // the app closes before the network is back.
+    tear.cut(Cut::Down(0));
+    a.vault.push().await.unwrap_err();
+    let mut a = a.restart(&through).await;
+    settle(&mut [&mut a, &mut b]).await;
+
+    assert_eq!(b.files()["trip.md"], "written on a train");
+    assert_eq!(a.files(), b.files());
+    let stream = Relay::new(&url).unwrap().read(&"vault".parse().unwrap(), None, 1).await.unwrap();
+    // The key, and the change once.
+    assert_eq!(stream.head, 2, "the change went into the stream more than once");
 }

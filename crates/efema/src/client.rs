@@ -9,7 +9,7 @@ use efema_proto::{Cursor, Epoch, StreamId, StreamName, chain};
 use lacodda_seal::{Key, KeyId, LockedKey};
 
 use crate::envelope::{self, Compression, ENTRY_OVERHEAD, KEY_CONTEXT, KeyEntry, Opened};
-use crate::state::State;
+use crate::state::{Queue, State, Waiting};
 use crate::transport::{Transport, TransportError};
 use crate::{DeviceId, Error};
 
@@ -26,8 +26,8 @@ pub enum Secret<'a> {
     Key(Key),
 }
 
-/// One device's view of one stream: it seals what it pushes, opens what it
-/// pulls, and remembers how far it has read.
+/// One device's view of one stream: it seals what it pushes, keeps it until
+/// the relay has it, opens what it pulls, and remembers how far it has read.
 ///
 /// ```no_run
 /// use efema::{Client, Epoch, Relay, Secret, State};
@@ -137,11 +137,14 @@ impl Pulled {
     }
 }
 
-/// Where a push landed.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pushed {
-    /// The position of each item, in the order they were given.
-    pub positions: Vec<u64>,
+/// What a [`Client::push`] or a [`Client::send`] took to the relay.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Sent {
+    /// Items now on the relay that were waiting on this device - those of
+    /// earlier pushes too, sent first.
+    pub items: usize,
+    /// The batches they went in.
+    pub batches: usize,
 }
 
 impl<T: Transport> Client<T> {
@@ -210,23 +213,28 @@ impl<T: Transport> Client<T> {
         self.compression
     }
 
-    /// Compresses and seals each item, and appends them to the stream, in
-    /// order.
+    /// Compresses and seals each item, keeps them on this device, and sends
+    /// everything the device has waiting for the stream - these items last.
     ///
-    /// Items that fit in one request go as one batch - all on consecutive
-    /// positions, or none. More than that is cut into several batches, each
-    /// whole on its own; if one fails, [`Error::Interrupted`] says how many
-    /// items made it.
+    /// The items are kept before anything is sent, in the device's
+    /// [`State`]: sealed, and cut into batches that each fit in one request,
+    /// each to land whole - all on consecutive positions, or none. Once kept,
+    /// they outlive a torn connection, a relay that is down and the app
+    /// closing: they wait, and go with the next push or [`Client::send`]. A
+    /// batch whose answer was lost goes again as it was, and the relay, which
+    /// knows it by what it holds, does not write it twice.
     ///
     /// # Errors
     ///
-    /// [`Error::ItemTooLarge`] before anything is sent, when one item cannot
-    /// fit in a request uncompressed - whether it compresses does not change
-    /// the limit; [`Error::EpochBehind`] when a newer version of the
-    /// app has moved the stream on; [`Error::StreamGone`] and
-    /// [`Error::StreamReplaced`] when the relay no longer has the stream this
-    /// device knew - nothing is written then.
-    pub async fn push<I>(&self, items: I) -> Result<Pushed, Error>
+    /// [`Error::Unsent`] when the items are kept but not all sent: its source
+    /// says why - [`Error::Transport`] for a relay that cannot be reached,
+    /// worth a [`Client::send`] later; [`Error::EpochBehind`],
+    /// [`Error::StreamGone`] or [`Error::StreamReplaced`] for a stream that
+    /// will not take them. Before anything is kept: [`Error::ItemTooLarge`]
+    /// when one item cannot fit in a request uncompressed - whether it
+    /// compresses does not change the limit - and [`Error::StreamGone`] when
+    /// the app forgot the stream since this client opened it.
+    pub async fn push<I>(&self, items: I) -> Result<Sent, Error>
     where
         I: IntoIterator,
         I::Item: AsRef<[u8]>,
@@ -252,27 +260,90 @@ impl<T: Transport> Client<T> {
                 }
             }
         }
+        if !batches.is_empty() {
+            blocking({
+                let state = self.state.clone();
+                let (stream, id, epoch) = (self.stream.clone(), self.id, self.epoch);
+                move || state.queue(&stream, id, epoch, &batches)
+            })
+            .await?;
+        }
+        self.send().await
+    }
 
-        let mut positions = Vec::new();
-        for entries in batches {
-            let count = entries.len() as u64;
-            let batch = Batch { epoch: self.epoch, entries, stream: Some(self.id) };
-            let landed = match self.transport.append(&self.stream, &batch).await {
-                Ok(written) if written.stream != self.id => Err(Error::StreamReplaced { stream: self.stream.clone() }),
-                Ok(written) if written.last + 1 - written.first != count => Err(Error::Transport(not_protocol(
+    /// Sends what waits on this device for the stream, oldest first, until
+    /// nothing does - after a push that could not send, when the network is
+    /// back, or when the app starts.
+    ///
+    /// Each batch leaves the device once the relay has it; a batch whose
+    /// answer was lost stays, and goes again as it was.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unsent`] when something still waits, with the reason as its
+    /// source, as for [`Client::push`].
+    pub async fn send(&self) -> Result<Sent, Error> {
+        let turn = self.state.sending(&self.stream);
+        let _turn = turn.lock().await;
+        let mut sent = Sent::default();
+        let stopped = loop {
+            let waiting = blocking({
+                let state = self.state.clone();
+                let (stream, id) = (self.stream.clone(), self.id);
+                move || state.oldest_unsent(&stream, id)
+            })
+            .await;
+            let result = match waiting {
+                Ok(Some(waiting)) => self.send_batch(waiting).await,
+                Ok(None) => return Ok(sent),
+                Err(e) => Err(e),
+            };
+            match result {
+                Ok(items) => {
+                    sent.items += items;
+                    sent.batches += 1;
+                }
+                Err(e) => break e,
+            }
+        };
+        match self.queue().await {
+            Ok(queue) if !queue.is_empty() => Err(Error::Unsent { unsent: queue.items, source: Box::new(stopped) }),
+            _ => Err(stopped),
+        }
+    }
+
+    /// Sends one queued batch, and takes it out of the queue once the relay
+    /// has it. How many items it carried.
+    async fn send_batch(&self, waiting: Waiting) -> Result<usize, Error> {
+        let count = waiting.entries.len();
+        let batch = Batch { epoch: waiting.epoch, entries: waiting.entries, stream: Some(self.id) };
+        match self.transport.append(&self.stream, &batch).await {
+            Ok(written) if written.stream != self.id => {
+                return Err(Error::StreamReplaced { stream: self.stream.clone() });
+            }
+            Ok(written) if written.last.checked_sub(written.first) != Some(count as u64 - 1) => {
+                return Err(Error::Transport(not_protocol(
                     &self.transport,
                     format!("{count} entries were sent and {}..{} came back", written.first, written.last),
-                ))),
-                Ok(written) => Ok(written),
-                Err(e) => Err(write_error(e, &self.stream, self.epoch)),
-            };
-            match landed {
-                Ok(written) => positions.extend(written.first..=written.last),
-                Err(e) if positions.is_empty() => return Err(e),
-                Err(e) => return Err(Error::Interrupted { written: positions.len(), source: Box::new(e) }),
+                )));
             }
+            Ok(_) => {}
+            Err(e) => return Err(write_error(e, &self.stream, waiting.epoch)),
         }
-        Ok(Pushed { positions })
+        let state = self.state.clone();
+        blocking(move || state.sent(waiting.id)).await?;
+        Ok(count)
+    }
+
+    /// What waits on this device to be sent to the stream.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::State`] when the state file cannot be read.
+    pub async fn queue(&self) -> Result<Queue, Error> {
+        let state = self.state.clone();
+        let stream = self.stream.clone();
+        blocking(move || state.queued(&stream)).await
     }
 
     /// Reads what came after this device's acknowledged cursor: one page,

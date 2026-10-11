@@ -10,7 +10,7 @@ use crate::transport::TransportError;
 /// Why a client operation failed.
 ///
 /// The variants are sorted by what the app can do: try again later
-/// ([`Error::Transport`]), update itself ([`Error::EpochBehind`],
+/// ([`Error::Transport`], [`Error::Unsent`]), update itself ([`Error::EpochBehind`],
 /// [`Error::NewerEpoch`], [`Error::NewerEntryFormat`], [`Error::NewerCodec`]),
 /// ask the person ([`Error::WrongPassphrase`], [`Error::KeyMismatch`],
 /// [`Error::PassphraseRace`]), or recover a stream
@@ -49,7 +49,9 @@ pub enum Error {
     BrokenChain { stream: StreamName, seq: u64 },
 
     /// A newer version of the app has moved the stream to a newer epoch; this
-    /// one can no longer write to it. The app needs updating.
+    /// one can no longer write to it. The app needs updating. `ours` is the
+    /// epoch of what was being sent - for items an older version of the app
+    /// left waiting, older than the app's own.
     #[error(
         "stream {stream} is at epoch {current}, and this app writes epoch {ours}: a newer version of the app has written to it"
     )]
@@ -105,11 +107,15 @@ pub enum Error {
     /// One item is larger than one request may carry.
     #[error("an item of {size} bytes is larger than the {limit} bytes one request may carry")]
     ItemTooLarge { size: usize, limit: usize },
-    /// A push was cut into several batches, and it stopped partway: the first
-    /// `written` items are on the relay, the rest are not.
-    #[error("the push stopped after {written} of its items were written")]
-    Interrupted {
-        written: usize,
+    /// Sending stopped with items still waiting on this device: they are
+    /// kept, sealed, and go with the next [`Client::push`](crate::Client::push)
+    /// or [`Client::send`](crate::Client::send). The source says why it
+    /// stopped - a [`Error::Transport`] is worth trying again later; an
+    /// [`Error::EpochBehind`], [`Error::StreamGone`] or
+    /// [`Error::StreamReplaced`] will not pass by waiting.
+    #[error("{unsent} items wait on this device to be sent")]
+    Unsent {
+        unsent: usize,
         #[source]
         source: Box<Error>,
     },

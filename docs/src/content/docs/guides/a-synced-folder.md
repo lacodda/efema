@@ -38,26 +38,26 @@ $ mini-vault --relay http://127.0.0.1:2451 --folder ./desktop --state ./desktop-
 applied 0 change(s), sent 1
 $ mini-vault --relay http://127.0.0.1:2451 --folder ./laptop --state ./laptop-state sync --once
 applied 0 change(s), sent 2
-conflict: both versions kept, the other one as notes/plan (conflict 249b3cca).md
+conflict: both versions kept, the other one as notes/plan (conflict 4d3934d1).md
 $ mini-vault --relay http://127.0.0.1:2451 --folder ./desktop --state ./desktop-state sync --once
 applied 2 change(s), sent 0
-conflict: both versions kept, the other one as notes/plan (conflict 249b3cca).md
+conflict: both versions kept, the other one as notes/plan (conflict 4d3934d1).md
 $ ls laptop/notes
-2026  plan (conflict 249b3cca).md  plan.md
+2026  plan (conflict 4d3934d1).md  plan.md
 ```
 
 The laptop's edit reached the stream second and was made without seeing the
 desktop's, so it keeps the name, and the desktop's version - written by device
-`249b3cca` - sits beside it on both devices. Lines from the relay's log of the
+`4d3934d1` - sits beside it on both devices. Lines from the relay's log of the
 same run, timestamps left out - positions and sizes, nothing more:
 
 ```console
 INFO vault: wrote 1 entry (172 bytes) at 1, epoch 1
-INFO vault: wrote 3 entries (48357 bytes) at 2..4, epoch 1
+INFO vault: wrote 3 entries (48358 bytes) at 2..4, epoch 1
 INFO vault: read 4 entries after 0
-INFO vault: wrote 1 entry (185 bytes) at 5, epoch 1
+INFO vault: wrote 1 entry (199 bytes) at 5, epoch 1
 INFO vault: read 4 entries after 1
-INFO vault: wrote 2 entries (344 bytes) at 6..7, epoch 1
+INFO vault: wrote 2 entries (367 bytes) at 6..7, epoch 1
 ```
 
 ## What the app does
@@ -80,6 +80,12 @@ app's, and mini-vault does it the way a real app has to:
   never leaves half a file.
 - **The cursor moves after the folder and the index do**, so a crash in
   between applies the same changes again, harmlessly.
+- **A change the client kept is on its way**, sent or not: when sending stops
+  partway - `Error::Unsent` - the changes are already in the client's queue,
+  so the index counts them as sent, and the next scan does not send them a
+  second time. Each sync starts by sending what an earlier one left waiting.
+- **The network comes and goes**: a sync that stops is reported and tried
+  again a few seconds later, instead of ending the app.
 
 ## Merging
 

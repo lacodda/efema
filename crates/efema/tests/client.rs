@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use common::{Between, Device, NEW_PASSPHRASE, PASSPHRASE, TestRelay, contains, data, drain, name, relay_bytes};
+use common::{
+    Between, Device, NEW_PASSPHRASE, PASSPHRASE, TestRelay, contains, data, drain, name, relay_bytes, unsent,
+};
 use efema::{Compression, ENTRY_OVERHEAD, Epoch, Error, Key, Limits, Secret, Transport, chain};
 use tokio::sync::Barrier;
 
@@ -19,9 +21,9 @@ async fn two_devices_sync_through_the_relay() {
     let relay = TestRelay::start().await;
     let (laptop, phone) = (Device::new(), Device::new());
     let on_laptop = laptop.open(relay.transport(), "notes", 1).await;
-    let pushed = on_laptop.push([b"first".as_slice(), b"second"]).await.unwrap();
-    // Position 1 is the stream's key.
-    assert_eq!(pushed.positions, [2, 3]);
+    let sent = on_laptop.push([b"first".as_slice(), b"second"]).await.unwrap();
+    assert_eq!((sent.items, sent.batches), (2, 1));
+    assert!(on_laptop.queue().await.unwrap().is_empty());
 
     let on_phone = phone.open(relay.transport(), "notes", 1).await;
     let received = drain(&on_phone).await;
@@ -65,7 +67,15 @@ async fn nothing_the_relay_keeps_or_logs_is_plaintext() {
     let key = on_laptop.key().to_bytes();
     let hex_key: String = key.iter().map(|b| format!("{b:02x}")).collect();
     let devices = [laptop.state.device(), phone.state.device()];
+    let url = relay.url.clone();
     let dir = relay.stop().await;
+
+    // With the relay gone, a push waits on the device - sealed there too.
+    let offline = efema::Relay::new(&url).unwrap();
+    let waiting = laptop.try_open(offline, "notes", 1, Secret::Passphrase(NEW_PASSPHRASE)).await.unwrap();
+    let (kept, _) = unsent(waiting.with_compression(Compression::Off).push([marker]).await);
+    assert_eq!(kept, 1);
+
     let stored = relay_bytes(dir.path());
     assert!(stored.len() > long.len(), "the relay's files were not found");
     let secrets: [(&str, &[u8]); 4] = [
@@ -87,8 +97,8 @@ async fn nothing_the_relay_keeps_or_logs_is_plaintext() {
         assert!(!contains(&log, secret), "{what} was logged");
     }
 
-    // Nor does a device's own state hold the key or the passphrase: only the
-    // key, locked.
+    // Nor does a device's own state hold an item, the key or the passphrase:
+    // only the key, locked, and what waits to be sent, sealed.
     for device in [&laptop, &phone] {
         let state = relay_bytes(device.dir.path());
         assert!(state.len() > 1000, "the state files were not found");
@@ -171,7 +181,9 @@ async fn a_device_that_joined_opens_without_the_network() {
     let wrong = device.try_open(efema::Relay::new(&gone).unwrap(), "notes", 1, Secret::Passphrase(b"nope")).await;
     assert!(matches!(wrong, Err(Error::WrongPassphrase { .. })), "{wrong:?}");
 
-    let unreachable = client.push([b"x"]).await.unwrap_err();
+    // Kept on the device, and not sent: the relay cannot be reached.
+    let (unsent, unreachable) = unsent(client.push([b"x"]).await);
+    assert_eq!(unsent, 1);
     assert!(matches!(unreachable, Error::Transport(efema::TransportError::Unreachable { .. })), "{unreachable:?}");
 }
 
@@ -234,7 +246,10 @@ async fn an_older_app_stops_before_a_newer_epoch_and_cannot_write_behind_it() {
     let stopped = on_old.pull().await.unwrap_err();
     assert!(matches!(stopped, Error::NewerEpoch { seq: 4, ours: Epoch(1), entry: Epoch(2), .. }), "{stopped:?}");
     assert_eq!(on_old.cursor().await.unwrap().seq, 3);
-    let refused = on_old.push([b"v1 d"]).await.unwrap_err();
+    // Both of the old app's pushes wait on its device: the stream will not
+    // take them, and says why.
+    let (waiting, refused) = unsent(on_old.push([b"v1 d"]).await);
+    assert_eq!(waiting, 2);
     assert!(matches!(refused, Error::EpochBehind { ours: Epoch(1), current: Epoch(2), .. }), "{refused:?}");
 
     // The newer app reads both epochs, and knows which is which.
@@ -254,10 +269,10 @@ async fn a_push_is_cut_to_what_one_request_may_carry() {
     let opened = appends.load(Ordering::SeqCst);
 
     let items: Vec<Vec<u8>> = (0..20u8).map(|i| vec![i; 150]).collect();
-    let pushed = client.push(&items).await.unwrap();
-    assert_eq!(pushed.positions, (2..22).collect::<Vec<u64>>());
+    let sent = client.push(&items).await.unwrap();
     let batches = appends.load(Ordering::SeqCst) - opened;
     assert!(batches > 1, "twenty items of 150 bytes went in one request of at most 1000");
+    assert_eq!((sent.items, sent.batches), (20, batches));
     assert_eq!(data(&drain(&client).await), items.iter().map(Vec::as_slice).collect::<Vec<_>>());
 
     let largest = client.max_item_len().await.unwrap();
@@ -267,6 +282,7 @@ async fn a_push_is_cut_to_what_one_request_may_carry() {
     let refused = client.push([vec![1u8; 10], vec![0u8; largest + 1]]).await.unwrap_err();
     assert!(matches!(refused, Error::ItemTooLarge { .. }), "{refused:?}");
     assert_eq!(appends.load(Ordering::SeqCst), sent, "part of a push that could not fit was sent");
+    assert!(client.queue().await.unwrap().is_empty(), "part of a push that could not fit was kept");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -282,7 +298,7 @@ async fn a_relay_that_lost_its_data_is_not_written_into() {
     drop(relay.stop().await);
     let relay = TestRelay::start().await;
     let client = device.open(relay.transport(), "notes", 1).await;
-    assert!(matches!(client.push([b"after"]).await, Err(Error::StreamGone { .. })));
+    assert!(matches!(unsent(client.push([b"after"]).await), (1, Error::StreamGone { .. })));
     assert!(matches!(client.pull().await, Err(Error::StreamGone { .. })));
     assert!(relay.transport().read(&name("notes"), None, 10).await.is_err(), "the push created a stream");
 
@@ -290,12 +306,14 @@ async fn a_relay_that_lost_its_data_is_not_written_into() {
     // that one, and it says so instead of mixing into it.
     let other = Device::new();
     other.open(relay.transport(), "notes", 1).await.push([b"anew"]).await.unwrap();
-    assert!(matches!(client.push([b"after"]).await, Err(Error::StreamReplaced { .. })));
+    assert!(matches!(unsent(client.push([b"after"]).await), (2, Error::StreamReplaced { .. })));
     assert!(matches!(client.pull().await, Err(Error::StreamReplaced { .. })));
 
-    // Forgetting the stream lets the device join the new one.
+    // Forgetting the stream lets the device join the new one - and lets go
+    // of what waited for the old.
     device.state.forget(&name("notes")).unwrap();
     let client = device.open(relay.transport(), "notes", 1).await;
+    assert!(client.queue().await.unwrap().is_empty());
     assert_eq!(data(&drain(&client).await), [b"anew".as_slice()]);
 }
 
@@ -616,7 +634,7 @@ async fn the_doctor_reports_what_the_device_and_the_relay_know() {
     assert!(report.problems().is_empty(), "{report}");
     assert_eq!(report.key.id, on_a.key().id());
     let shown = report.to_string();
-    for line in ["relay ", "stream ", "cursor ", "key ", "device ", "epoch "] {
+    for line in ["relay ", "stream ", "cursor ", "queue ", "key ", "device ", "epoch "] {
         assert!(shown.contains(line), "the report has no `{line}` line:\n{shown}");
     }
     assert!(shown.contains("4 entries to read"), "{shown}");

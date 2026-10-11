@@ -29,6 +29,9 @@ zstd.workspace = true
 # Tests talk to a real relay. Published before this crate (publish.yml), so
 # the version this names is on crates.io when the client goes up.
 efema-server.workspace = true
+# Tests against connections torn the way a network tears them. Published
+# before this crate, like efema-server.
+lacodda-tear.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true

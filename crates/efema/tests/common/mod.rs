@@ -1,5 +1,6 @@
-//! A real relay on a real socket for the client to talk to, and a transport
-//! that stands between them to play a relay that misbehaves.
+//! A real relay on a real socket for the client to talk to, a transport that
+//! stands between them to play a relay that misbehaves, and - in front of the
+//! relay - a proxy that tears connections the way a network does.
 
 #![allow(dead_code)]
 
@@ -20,6 +21,7 @@ pub const NEW_PASSPHRASE: &[u8] = b"a longer and a better passphrase";
 
 pub struct TestRelay {
     pub url: String,
+    pub addr: std::net::SocketAddr,
     stop: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<std::io::Result<()>>>,
     pub dir: TempDir,
@@ -33,12 +35,13 @@ impl TestRelay {
     pub async fn start_in(dir: TempDir) -> Self {
         let relay = efema_server::Relay::open(dir.path()).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}");
         let (stop, stopped) = oneshot::channel::<()>();
         let task = tokio::spawn(relay.serve(listener, async move {
             let _ = stopped.await;
         }));
-        Self { url, stop: Some(stop), task: Some(task), dir }
+        Self { url, addr, stop: Some(stop), task: Some(task), dir }
     }
 
     /// Stops the relay and hands back its directory.
@@ -112,6 +115,15 @@ pub async fn drain<T: Transport>(client: &Client<T>) -> Vec<efema::Received> {
     }
 }
 
+/// A push or a send that stopped with items kept: how many wait, and why it
+/// stopped.
+pub fn unsent(result: Result<efema::Sent, efema::Error>) -> (usize, efema::Error) {
+    match result {
+        Err(efema::Error::Unsent { unsent, source }) => (unsent, *source),
+        other => panic!("expected items left waiting, got {other:?}"),
+    }
+}
+
 pub fn data(received: &[efema::Received]) -> Vec<&[u8]> {
     received.iter().map(|r| r.data.as_slice()).collect()
 }
@@ -177,11 +189,14 @@ pub struct Between {
     /// Holds each append until every transport sharing it has one waiting:
     /// two devices writing at the same moment, on purpose.
     pub together: Option<Arc<Barrier>>,
+    /// Told the number of each append, from 1, before it goes - to arm a
+    /// cut for that one.
+    pub on_append: Option<Arc<dyn Fn(usize) + Send + Sync>>,
 }
 
 impl Between {
     pub fn new(relay: Relay) -> Self {
-        Self { relay, limits: Limits::V1, tamper: None, appends: Arc::default(), together: None }
+        Self { relay, limits: Limits::V1, tamper: None, appends: Arc::default(), together: None, on_append: None }
     }
 }
 
@@ -195,7 +210,10 @@ impl Transport for Between {
     }
 
     async fn append(&self, stream: &StreamName, batch: &Batch) -> Result<Written, TransportError> {
-        self.appends.fetch_add(1, Ordering::SeqCst);
+        let number = self.appends.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some(on_append) = &self.on_append {
+            on_append(number);
+        }
         if let Some(together) = &self.together {
             together.wait().await;
         }
@@ -213,4 +231,45 @@ impl Transport for Between {
     async fn wait(&self, watches: &[Watch], timeout: Duration) -> Result<Heads, TransportError> {
         self.relay.wait(watches, timeout).await
     }
+}
+
+/// A relay with a proxy in front that tears connections on cue.
+pub struct TornRelay {
+    pub relay: TestRelay,
+    pub tear: Arc<lacodda_tear::Tear>,
+}
+
+impl TornRelay {
+    pub async fn start() -> Self {
+        let relay = TestRelay::start().await;
+        let tear = Arc::new(lacodda_tear::Tear::start(relay.addr).await.unwrap());
+        Self { relay, tear }
+    }
+
+    /// The relay as a client reaches it: through the proxy.
+    pub fn through(&self) -> Relay {
+        Relay::new(&format!("http://{}", self.tear.addr())).unwrap()
+    }
+
+    /// The relay as it is, around the proxy: what it really holds.
+    pub fn direct(&self) -> Relay {
+        self.relay.transport()
+    }
+
+    /// The stream's last position, asked of the relay itself.
+    pub async fn head(&self, stream: &str) -> u64 {
+        self.direct().read(&name(stream), None, 1).await.unwrap().head
+    }
+}
+
+/// Bytes that zstd cannot shorten: a push of them is as long on the wire as
+/// it is in memory, so a cut lands where the test meant it to.
+pub fn noise(len: usize, seed: u64) -> Vec<u8> {
+    let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    (0..len)
+        .map(|_| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 33) as u8
+        })
+        .collect()
 }

@@ -34,8 +34,8 @@ on exactly that version, so the number cannot quietly rot.
 | `crates/efema-proto/` | The wire format: names, identities, cursors, epochs, the hash chain, the CBOR messages |
 | `crates/efema-server/` | The relay: SQLite storage, the HTTP surface, waiting, and the `efema-server` binary |
 | `crates/efema-server/tests/` | The relay over a real socket, the binary as an operator runs it, and the published face held to the code |
-| `crates/efema/` | The client library: the transport, the device's state, sealing entries, pull and push, `doctor` |
-| `crates/efema/tests/` | The client against a real relay - and against the real relay behind a transport that misbehaves on purpose |
+| `crates/efema/` | The client library: the transport, the device's state and its queue of what waits to be sent, sealing entries, pull and push, `doctor` |
+| `crates/efema/tests/` | The client against a real relay - behind a transport that misbehaves on purpose, and behind a proxy that tears connections |
 | `crates/lacodda-seal/` | The line's sealing: a key, a sealed blob, a key locked under a passphrase |
 | `crates/lacodda-tear/` | The line's test bench for broken networks: a TCP proxy that tears connections on cue |
 | `examples/mini-vault/` | An example app: a folder synced between devices, with merging; tested as two processes |

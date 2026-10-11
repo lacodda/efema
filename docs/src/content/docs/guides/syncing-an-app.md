@@ -1,6 +1,6 @@
 ---
 title: Syncing an app
-description: Use the efema client library in a Rust app - open a stream, push changes, pull and acknowledge, wait for news, change the passphrase, and handle what can go wrong.
+description: Use the efema client library in a Rust app - open a stream, push changes, pull and acknowledge, wait for news, keep working when the network breaks, change the passphrase, and handle what can go wrong.
 ---
 
 The [`efema`](https://docs.rs/efema) crate is what an app links to. It seals
@@ -52,16 +52,22 @@ open with `Secret::Key(Key::from_bytes(bytes))` next time. Whoever holds those
 ## Push
 
 ```rust
-let pushed = notes.push([change_a.as_slice(), change_b.as_slice()]).await?;
-// pushed.positions: where each one landed, in order
+let sent = notes.push([change_a.as_slice(), change_b.as_slice()]).await?;
+// sent.items: how many went to the relay
 ```
 
-Each item is compressed, sealed and appended. Items that fit in one request
-land as one batch: on consecutive positions, all or none. A push larger than
-that is cut into batches that each fit; if one fails partway,
-`Error::Interrupted` says how many items made it. An item too large for a
-request of its own is refused before anything is sent - `notes.max_item_len()`
-says the limit, which is the same whether the item compresses or not.
+Each item is compressed and sealed, and **kept on the device** - in its
+`State` - before anything is sent. Then everything the device has waiting for
+the stream goes, oldest first. Items that fit in one request go as one batch:
+on consecutive positions, all or none. A push larger than that is cut into
+batches that each fit, each whole on its own. An item too large for a request
+of its own is refused before anything is kept - `notes.max_item_len()` says the
+limit, which is the same whether the item compresses or not.
+
+When sending stops - no network, a relay that is down -
+`Error::Unsent` says how many items wait on the device, and its source says
+why. They are not lost: the next `push`, or `send`, takes them. See
+[When the network breaks](#when-the-network-breaks).
 
 ### Compression
 
@@ -112,6 +118,53 @@ Each entry says who wrote it (`device`) and whether that was this device
 devices can change the same thing before either hears from the other, and
 only the stream's order says which change came last. Skipping your own entries
 is the classic way two devices end up disagreeing.
+
+## When the network breaks
+
+A phone on a train, a laptop closing its lid, a relay restarting: sending
+breaks, and what was being sent is in one of three places - not sent, sent and
+not written, or written with the answer lost on the way back. The client
+treats all three the same way, and none of them loses or doubles a change.
+
+- **What is pushed waits on the device until the relay has it.** Sealed, in
+  the state file, cut into the batches it will go in. Closing the app does not
+  lose it; the next run sends it.
+- **A batch goes again as it was, byte for byte.** The relay knows a batch by
+  what it holds, so a batch it wrote already - its answer lost - is answered
+  with where it landed, and not written a second time.
+- **Sending resumes where it stopped.** Batches the relay took leave the
+  device as they land; what is left goes next time, in order, before anything
+  pushed since.
+- **A torn read moves nothing.** The cursor moves only with `ack`, so the next
+  `pull` reads from the last page the app applied - not from the start.
+
+So the app's part is to send again, at a moment of its choosing:
+
+```rust
+match notes.push([change.as_slice()]).await {
+    Ok(_) => {}
+    // Kept on the device: show "waiting to sync", try again later.
+    Err(efema::Error::Unsent { unsent, source }) => app.waiting(unsent, &source),
+    Err(e) => return Err(e.into()),
+}
+
+// When the app starts, when the network is back, on a timer:
+notes.send().await?;
+```
+
+`notes.queue()` says what waits - how many items, how many bytes, since when -
+for a status line; the [doctor](#doctor) shows it too.
+
+The client does not retry on its own: when to try again - at once, in a
+minute, when the operating system says the network is back - is the app's to
+decide. Waiting does no harm; nothing is lost while it waits.
+
+If what waits can never go - the stream is gone from the relay, replaced, or
+moved to an epoch only a newer app writes - the source of `Unsent` says so,
+and every later send stops the same way. `State::forget(&stream)` lets the
+device start over, and lets go of what waited with the rest; the app's own
+data still has every change, and it sends what the stream lacks once it has
+joined again (see [When the relay is not what it was](#when-the-relay-is-not-what-it-was)).
 
 ## Wait for news
 
@@ -190,18 +243,20 @@ println!("{}", notes.doctor().await);
 
 ```console
 relay    http://127.0.0.1:2451 - answered in 3 ms
-stream   vault - stream 946ece38, epoch 1, 7 entries
-cursor   at 7 - up to date
-key      4f9947f501e49908 - locked 2026-10-09 (today), argon2id 64 MiB × 3 × 4
-device   28263325
+stream   vault - stream 9d43e105, epoch 1, 7 entries
+cursor   at 5 - 2 entries to read
+queue    empty
+key      1005a7587958c346 - locked 2026-10-11 (today), argon2id 64 MiB × 3 × 4
+device   22f164e5
 epoch    1 - written, and read up to
 ```
 
 One report, the same in every app: whether the relay answers, how far behind
-the device is, which key the stream is sealed under (the same id on every
-device), how old its lock is and how many times the passphrase was changed. `report.problems()` lists what is wrong, one
-line each, with what to do about it. Show it under your app's own `doctor`
-command.
+the device is, what waits on it to be sent, which key the stream is sealed
+under (the same id on every device), how old its lock is and how many times
+the passphrase was changed. `report.problems()` lists what is wrong, one line
+each, with what to do about it - items that have waited more than a day among
+them. Show it under your app's own `doctor` command.
 
 ## Related
 
