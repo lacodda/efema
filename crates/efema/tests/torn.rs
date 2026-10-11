@@ -11,8 +11,8 @@ mod common;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use common::{Between, Device, TornRelay, data, drain, noise, unsent};
-use efema::{Compression, Error, Limits};
+use common::{Between, Device, TornRelay, data, drain, name, noise, unsent};
+use efema::{Compression, Epoch, Error, Limits};
 use lacodda_tear::{Cut, Direction};
 
 /// The push stopped, its items are kept, and the network is why.
@@ -175,4 +175,34 @@ async fn two_sends_at_once_take_turns() {
     assert_eq!(one.items + other.items, 3);
     assert_eq!(appends.load(Ordering::SeqCst) - online, 3, "a batch was sent by both");
     assert_eq!(torn.head("notes").await, 1 + 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_an_older_app_left_waiting_is_refused_by_name_until_forgotten() {
+    let torn = TornRelay::start().await;
+    let (device, other) = (Device::new(), Device::new());
+    let old_app = device.open(torn.through(), "notes", 1).await;
+    torn.tear.offline();
+    kept_for_the_network(old_app.push([b"from the old app".as_slice()]).await, 1);
+    drop(old_app);
+
+    // Meanwhile a newer app on another device moves the stream to epoch 2,
+    // and this device is updated before it is back online.
+    other.open(torn.direct(), "notes", 2).await.push([b"epoch 2"]).await.unwrap();
+    torn.tear.online();
+    let device = device.restart();
+    let new_app = device.open(torn.through(), "notes", 2).await;
+    let (waiting, refused) = unsent(new_app.send().await);
+    assert_eq!(waiting, 1);
+    // Named for what was being sent - the old app's epoch - not this app's.
+    assert!(matches!(refused, Error::EpochBehind { ours: Epoch(1), current: Epoch(2), .. }), "{refused:?}");
+    let (_, again) = unsent(new_app.push([b"from the new app"]).await);
+    assert!(matches!(again, Error::EpochBehind { .. }), "a later push went ahead of what waited: {again:?}");
+
+    // The way out: forget, join again, and send what the stream lacks.
+    device.state.forget(&name("notes")).unwrap();
+    let new_app = device.open(torn.through(), "notes", 2).await;
+    assert!(new_app.queue().await.unwrap().is_empty());
+    new_app.push([b"from the new app"]).await.unwrap();
+    assert_eq!(data(&drain(&new_app).await), [b"epoch 2".as_slice(), b"from the new app"]);
 }
