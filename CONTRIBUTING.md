@@ -37,14 +37,16 @@ on exactly that version, so the number cannot quietly rot.
 | `crates/efema/` | The client library: the transport, the device's state, sealing entries, pull and push, `doctor` |
 | `crates/efema/tests/` | The client against a real relay - and against the real relay behind a transport that misbehaves on purpose |
 | `crates/lacodda-seal/` | The line's sealing: a key, a sealed blob, a key locked under a passphrase |
+| `crates/lacodda-tear/` | The line's test bench for broken networks: a TCP proxy that tears connections on cue |
 | `examples/mini-vault/` | An example app: a folder synced between devices, with merging; tested as two processes |
 | `assets/` | The mark's master SVGs and the rasters drawn from them |
 | `docs/` | The documentation site (Starlight) and `docs/adr/`, the architecture decisions |
 
 The efema crates share one version, set in `[workspace.package]`, and are
 released together ([ADR 0003](docs/adr/0003-three-crates.md)). `lacodda-seal`
-carries a version of its own, which moves only when it changes
-([ADR 0008](docs/adr/0008-lacodda-seal-in-this-workspace.md)); `mini-vault` is
+and `lacodda-tear` carry versions of their own, which move only when they
+change ([ADR 0008](docs/adr/0008-lacodda-seal-in-this-workspace.md),
+[ADR 0015](docs/adr/0015-lacodda-tear-in-this-workspace.md)); `mini-vault` is
 not published.
 
 Two rules the code keeps, and every change has to keep too:

@@ -27,8 +27,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       # Every crate, in dependency order: crates.io resolves a dependency at
       # publish time and refuses a package whose dependency it cannot see yet.
-      # Each crate at its own version - lacodda-seal does not move with efema
-      # (docs/adr/0008-lacodda-seal-in-this-workspace.md). A version already on
+      # Each crate at its own version - lacodda-seal and lacodda-tear do not
+      # move with efema (docs/adr/0008-lacodda-seal-in-this-workspace.md,
+      # docs/adr/0015-lacodda-tear-in-this-workspace.md). A version already on
       # crates.io is left out, so a run can be repeated - after a first version
       # published by hand, or a run that failed halfway - and a run with
       # nothing left to publish asks for no token at all.
@@ -37,7 +38,7 @@ jobs:
         run: |
           metadata=$(cargo metadata --no-deps --format-version 1)
           pending=""
-          for crate in efema-proto lacodda-seal efema-server efema; do
+          for crate in efema-proto lacodda-seal lacodda-tear efema-server efema; do
             version=$(echo "$metadata" | jq -r --arg name "$crate" '.packages[] | select(.name == $name) | .version')
             if curl -sf "https://crates.io/api/v1/crates/$crate/$version" -H 'user-agent: efema-release' > /dev/null; then
               echo "$crate $version is on crates.io already"

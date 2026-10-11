@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/efema-proto", "crates/efema-server", "crates/efema", "crates/lacodda-seal", "examples/mini-vault"]
+members = ["crates/efema-proto", "crates/efema-server", "crates/efema", "crates/lacodda-seal", "crates/lacodda-tear", "examples/mini-vault"]
 resolver = "3"
 
 [workspace.package]
@@ -17,6 +17,7 @@ efema-proto = { path = "crates/efema-proto", version = "0.3.0" }
 efema = { path = "crates/efema", version = "0.3.0" }
 efema-server = { path = "crates/efema-server", version = "0.3.0" }
 lacodda-seal = { path = "crates/lacodda-seal", version = "0.1.0" }
+lacodda-tear = { path = "crates/lacodda-tear", version = "0.1.0" }
 
 # The wire format: CBOR with integer keys, decoded strictly. Derives keep each
 # message one definition; unknown keys are skipped, so a field added later does

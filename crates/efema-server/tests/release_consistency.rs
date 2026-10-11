@@ -77,10 +77,24 @@ fn published() -> Vec<String> {
     crates
 }
 
-/// The crates released with efema's version. `lacodda-seal` carries its own
-/// (docs/adr/0008-lacodda-seal-in-this-workspace.md).
+/// The crates released with efema's version. The line's crates built here -
+/// `lacodda-seal`, `lacodda-tear` - carry their own
+/// (docs/adr/0008-lacodda-seal-in-this-workspace.md,
+/// docs/adr/0015-lacodda-tear-in-this-workspace.md).
 fn efema_crates() -> Vec<String> {
     published().into_iter().filter(|c| c.starts_with("efema")).collect()
+}
+
+/// The line's crates that live in this workspace, each with a version and a
+/// README of its own.
+fn line_crates() -> Vec<String> {
+    let line: Vec<String> = published().into_iter().filter(|c| c.starts_with("lacodda-")).collect();
+    assert_eq!(
+        line.len() + efema_crates().len(),
+        published().len(),
+        "a published crate is neither efema's nor the line's"
+    );
+    line
 }
 
 fn help(args: &[&str]) -> String {
@@ -133,10 +147,13 @@ fn every_crate_carries_the_one_version() {
     }
     // The workspace depends on its own crates at the versions they carry: a
     // stale one publishes a crate that asks for its sibling's previous release.
-    let seal = manifest_field("crates/lacodda-seal/Cargo.toml", "[package]", "version");
     let workspace = read("Cargo.toml");
     for member in published() {
-        let expected = if member == "lacodda-seal" { &seal } else { &version };
+        let expected = if line_crates().contains(&member) {
+            manifest_field(&format!("crates/{member}/Cargo.toml"), "[package]", "version")
+        } else {
+            version.clone()
+        };
         let dependency = workspace
             .lines()
             .find(|line| line.starts_with(&format!("{member} = ")))
@@ -175,16 +192,20 @@ fn readme_is_shared_rather_than_duplicated() {
             "crates/{member} has a README of its own"
         );
     }
-    // lacodda-seal is another product to its readers, with a README of its own.
-    assert_eq!(manifest_field("crates/lacodda-seal/Cargo.toml", "[package]", "readme"), "README.md");
+    // The line's crates are other products to their readers, each with a
+    // README of its own.
+    for member in line_crates() {
+        assert_eq!(manifest_field(&format!("crates/{member}/Cargo.toml"), "[package]", "readme"), "README.md");
+    }
 }
 
 #[test]
 fn readme_links_resolve_off_github() {
     // crates.io renders the same file with no repository to resolve a relative
     // path against: the banner becomes a broken image, the links 404.
-    for readme in ["README.md", "crates/lacodda-seal/README.md"] {
-        links_are_absolute(readme);
+    links_are_absolute("README.md");
+    for member in line_crates() {
+        links_are_absolute(&format!("crates/{member}/README.md"));
     }
 }
 
@@ -334,9 +355,9 @@ fn every_crate_is_published_in_dependency_order() {
     let line = publish.lines().find(|l| l.trim().starts_with("for crate in ")).expect("publish.yml loops over crates");
     let listed: Vec<&str> =
         line.trim().trim_start_matches("for crate in ").trim_end_matches("; do").split_whitespace().collect();
-    // A crate comes after every crate it depends on: crates.io resolves
-    // dependencies when it accepts a package.
-    let order = ["efema-proto", "lacodda-seal", "efema-server", "efema"];
+    // A crate comes after every crate it depends on, dev-dependencies
+    // included: crates.io resolves them when it accepts a package.
+    let order = ["efema-proto", "lacodda-seal", "lacodda-tear", "efema-server", "efema"];
     assert_eq!(listed, order, "publish.yml must publish every crate, each after what it depends on");
     let mut crates = published();
     crates.sort();
@@ -345,10 +366,9 @@ fn every_crate_is_published_in_dependency_order() {
     assert_eq!(crates, expected, "a crate is published that the order above does not place");
     for (index, member) in order.iter().enumerate() {
         let manifest = read(format!("crates/{member}/Cargo.toml"));
-        let dependencies = manifest.split("[dev-dependencies]").next().unwrap_or_default();
         for later in &order[index + 1..] {
             assert!(
-                !dependencies.lines().any(|l| l.starts_with(&format!("{later}.workspace"))),
+                !manifest.lines().any(|l| l.starts_with(&format!("{later}.workspace"))),
                 "{member} depends on {later}, which publish.yml publishes after it"
             );
         }

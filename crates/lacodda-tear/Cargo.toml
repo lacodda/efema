@@ -1,0 +1,20 @@
+[package]
+name = "lacodda-tear"
+# Its own version, not the workspace's: a test tool other projects of the line
+# depend on must not move because efema shipped
+# (docs/adr/0015-lacodda-tear-in-this-workspace.md).
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "A TCP proxy for tests that tears connections where you say: after so many bytes either way, after a while, or all at once"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage = "https://github.com/lacodda/efema/tree/main/crates/lacodda-tear"
+documentation = "https://docs.rs/lacodda-tear"
+readme = "README.md"
+keywords = ["testing", "proxy", "tcp", "fault-injection", "network"]
+categories = ["development-tools::testing", "network-programming"]
+
+[dependencies]
+tokio = { workspace = true, features = ["io-util"] }
