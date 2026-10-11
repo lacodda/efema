@@ -178,6 +178,9 @@ impl Write for Sink {
 /// the cursor the page was read after.
 pub type Tamper = dyn Fn(Option<&Cursor>, &mut Page) + Send + Sync;
 
+/// What a man in the middle does to the relay's answer to a write.
+pub type Answer = dyn Fn(&mut Written) + Send + Sync;
+
 /// The real relay, seen through a transport that can change what it says:
 /// smaller limits, pages altered on the way. Everything else goes to the
 /// relay as it is.
@@ -192,11 +195,21 @@ pub struct Between {
     /// Told the number of each append, from 1, before it goes - to arm a
     /// cut for that one.
     pub on_append: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+    /// What a man in the middle does to the relay's answer to a write.
+    pub answer: Option<Arc<Answer>>,
 }
 
 impl Between {
     pub fn new(relay: Relay) -> Self {
-        Self { relay, limits: Limits::V1, tamper: None, appends: Arc::default(), together: None, on_append: None }
+        Self {
+            relay,
+            limits: Limits::V1,
+            tamper: None,
+            appends: Arc::default(),
+            together: None,
+            on_append: None,
+            answer: None,
+        }
     }
 }
 
@@ -217,7 +230,11 @@ impl Transport for Between {
         if let Some(together) = &self.together {
             together.wait().await;
         }
-        self.relay.append(stream, batch).await
+        let mut written = self.relay.append(stream, batch).await?;
+        if let Some(answer) = &self.answer {
+            answer(&mut written);
+        }
+        Ok(written)
     }
 
     async fn read(&self, stream: &StreamName, after: Option<&Cursor>, limit: usize) -> Result<Page, TransportError> {

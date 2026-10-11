@@ -160,24 +160,33 @@ async fn three_devices_converge() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_change_whose_answer_was_lost_arrives_once_after_a_restart() {
+async fn changes_through_a_lost_answer_and_an_outage_arrive_once_after_a_restart() {
     let (url, _stop, _dir) = relay().await;
     let tear = Tear::start(url.trim_start_matches("http://").parse().unwrap()).await.unwrap();
     let through = format!("http://{}", tear.addr());
     let (mut a, mut b) = (Device::open(&through).await, Device::open(&url).await);
 
+    // The relay takes the first change; its answer never reaches the device.
     a.write("trip.md", "written on a train");
     a.vault.pull().await.unwrap();
-    // The relay takes the change; its answer never reaches the device, and
-    // the app closes before the network is back.
     tear.cut(Cut::Down(0));
     a.vault.push().await.unwrap_err();
+    // Then the network goes: the second change is kept, not sent - and the
+    // app tries again before it is back, which must not send either twice.
+    tear.offline();
+    a.write("tunnel.md", "written in a tunnel");
+    a.vault.push().await.unwrap_err();
+    let _ = a.vault.push().await;
+
+    // The app closes; it starts again with the network back.
     let mut a = a.restart(&through).await;
+    tear.online();
     settle(&mut [&mut a, &mut b]).await;
 
     assert_eq!(b.files()["trip.md"], "written on a train");
+    assert_eq!(b.files()["tunnel.md"], "written in a tunnel");
     assert_eq!(a.files(), b.files());
     let stream = Relay::new(&url).unwrap().read(&"vault".parse().unwrap(), None, 1).await.unwrap();
-    // The key, and the change once.
-    assert_eq!(stream.head, 2, "the change went into the stream more than once");
+    // The key, and each change once.
+    assert_eq!(stream.head, 3, "a change went into the stream more than once");
 }

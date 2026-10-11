@@ -7,7 +7,7 @@
 mod common;
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use common::{
@@ -283,6 +283,36 @@ async fn a_push_is_cut_to_what_one_request_may_carry() {
     assert!(matches!(refused, Error::ItemTooLarge { .. }), "{refused:?}");
     assert_eq!(appends.load(Ordering::SeqCst), sent, "part of a push that could not fit was sent");
     assert!(client.queue().await.unwrap().is_empty(), "part of a push that could not fit was kept");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_that_does_not_fit_the_batch_leaves_it_waiting() {
+    let relay = TestRelay::start().await;
+    let device = Device::new();
+    let mut between = Between::new(relay.transport());
+    // 0: the truth; 1: one position for two entries; 2: another stream.
+    let lie = Arc::new(AtomicUsize::new(0));
+    let lying = lie.clone();
+    between.answer = Some(Arc::new(move |written: &mut efema::wire::Written| match lying.load(Ordering::SeqCst) {
+        1 => written.last = written.first,
+        2 => written.stream = efema::StreamId::from_bytes([9; 16]),
+        _ => {}
+    }));
+    let client = device.open(between, "notes", 1).await;
+
+    lie.store(1, Ordering::SeqCst);
+    let (waiting, refused) = unsent(client.push([b"a".as_slice(), b"b"]).await);
+    assert_eq!(waiting, 2);
+    assert!(matches!(refused, Error::Transport(efema::TransportError::NotProtocol { .. })), "{refused:?}");
+    lie.store(2, Ordering::SeqCst);
+    let (waiting, refused) = unsent(client.send().await);
+    assert_eq!(waiting, 2);
+    assert!(matches!(refused, Error::StreamReplaced { .. }), "{refused:?}");
+
+    // Still the batch the relay has: sent again, it is known, and lands once.
+    lie.store(0, Ordering::SeqCst);
+    assert_eq!(client.send().await.unwrap().items, 2);
+    assert_eq!(data(&drain(&client).await), [b"a".as_slice(), b"b"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
