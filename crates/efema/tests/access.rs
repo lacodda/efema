@@ -4,8 +4,11 @@
 
 mod common;
 
-use common::{Device, PASSPHRASE, TestRelay, data, drain, noise, unsent};
-use efema::{Compression, Error, Relay, Secret};
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+
+use common::{Between, Device, PASSPHRASE, TestRelay, data, drain, noise, unsent};
+use efema::{Compression, Error, Limits, Relay, Secret};
 use efema_server::{Access, Config};
 
 fn tight(body: usize, entry: usize, quota: u64) -> Config {
@@ -38,9 +41,11 @@ async fn a_device_with_a_key_that_reads_pulls_and_keeps_nothing_to_send() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_key_that_reads_cannot_create_a_stream() {
     let relay = TestRelay::start().await;
-    let reader = relay.with(&relay.key("test", Access::Read));
+    let reader = Between::new(relay.with(&relay.key("test", Access::Read)));
+    let appends = reader.appends.clone();
     let refused = Device::new().try_open(reader, "notes", 1, Secret::Passphrase(PASSPHRASE)).await.unwrap_err();
     assert!(matches!(refused, Error::ReadOnly { .. }), "{refused:?}");
+    assert_eq!(appends.load(Ordering::SeqCst), 0, "a key that reads tried to create the stream");
     // Nothing on the relay: a device with a key that writes creates it.
     Device::new().open(relay.transport(), "notes", 1).await;
 }
@@ -172,4 +177,59 @@ async fn a_full_space_keeps_what_was_pushed_and_says_why() {
     let shown = report.to_string();
     assert!(shown.contains("of 4.9 KiB in the space"), "{shown}");
     assert!(report.problems().iter().any(|p| p.starts_with("the space holds")), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_given_a_key_that_writes_writes() {
+    let relay = TestRelay::start().await;
+    Device::new().open(relay.transport(), "notes", 1).await.push([b"first".as_slice()]).await.unwrap();
+    let phone = Device::new();
+    drop(phone.open(relay.with(&relay.key("test", Access::Read)), "notes", 1).await);
+
+    // The same device, the same stream, a key that writes now: what the
+    // device kept said it only reads, and the relay is asked again.
+    let on_phone = phone.open(relay.with(&relay.key("test", Access::Write)), "notes", 1).await;
+    let sent = on_phone.push([b"from the phone".as_slice()]).await.unwrap();
+    assert_eq!(sent.items, 1);
+    assert_eq!(data(&drain(&on_phone).await), [b"first".as_slice(), b"from the phone"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_relay_that_refuses_what_was_cut_to_its_own_limits_is_not_argued_with() {
+    let relay = TestRelay::start_with(tight(3_000, 3_000, u64::MAX)).await;
+    // A relay that announces more than it takes.
+    let mut between = Between::new(relay.transport());
+    between.limits = Some(Limits::DEFAULT);
+    let appends = between.appends.clone();
+    let device = Device::new();
+    let client = device.open(between, "notes", 1).await.with_compression(Compression::Off);
+    let opened = appends.load(Ordering::SeqCst);
+
+    let pushed =
+        tokio::time::timeout(Duration::from_secs(60), client.push([noise(1_200, 1), noise(1_200, 2), noise(1_200, 3)]))
+            .await
+            .expect("the client kept arguing with the relay");
+    let (kept, why) = unsent(pushed);
+    assert_eq!(kept, 3);
+    assert!(matches!(&why, Error::Transport(e) if e.code() == Some(&efema::wire::ProblemCode::TooLarge)), "{why:?}");
+    assert_eq!(appends.load(Ordering::SeqCst) - opened, 2, "sent, cut again, sent once more - and no more");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn limits_kept_for_long_are_asked_for_again_after_a_send() {
+    let relay = TestRelay::start_with(tight(3_000, 3_000, u64::MAX)).await;
+    let device = Device::new();
+    let client = device.open(relay.transport(), "notes", 1).await;
+    let tight_item = client.max_item_len().await.unwrap();
+    assert!(tight_item < 3_000);
+
+    // What the device keeps: the protocol's defaults, kept two days ago -
+    // and, after that, nothing at all, as a state from 0.4 has.
+    let state = rusqlite::Connection::open(device.dir.path().join("sync.sqlite3")).unwrap();
+    for (limits, at) in [(Some(efema::wire::encode(&Limits::DEFAULT)), 0i64), (None, 0)] {
+        state.execute("UPDATE streams SET limits = ?1, limits_at = ?2", rusqlite::params![limits, at]).unwrap();
+        assert!(client.max_item_len().await.unwrap() > tight_item, "the change did not take");
+        client.push([b"small enough for any relay".as_slice()]).await.unwrap();
+        assert_eq!(client.max_item_len().await.unwrap(), tight_item, "the relay was not asked again");
+    }
 }

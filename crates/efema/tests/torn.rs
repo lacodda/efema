@@ -95,7 +95,7 @@ async fn a_long_push_resumes_where_it_stopped() {
     let (laptop, phone) = (Device::new(), Device::new());
     let mut between = Between::new(torn.through());
     // One 1200-byte item per request.
-    between.limits = Limits { body: 2_000, ..Limits::DEFAULT };
+    between.limits = Some(Limits { body: 2_000, ..Limits::DEFAULT });
     let appends = between.appends.clone();
     // The append that loses its answer, once the client has opened.
     let doomed = Arc::new(AtomicUsize::new(usize::MAX));
@@ -133,7 +133,7 @@ async fn a_pull_torn_partway_resumes_from_the_acknowledged_cursor() {
     on_laptop.push(&items).await.unwrap();
 
     let mut between = Between::new(torn.through());
-    between.limits = Limits { page_entries: 10, ..Limits::DEFAULT };
+    between.limits = Some(Limits { page_entries: 10, ..Limits::DEFAULT });
     let on_phone = phone.open(between, "notes", 1).await;
     let first = on_phone.pull().await.unwrap();
     on_phone.ack(&first).await.unwrap();

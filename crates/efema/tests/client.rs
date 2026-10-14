@@ -270,7 +270,7 @@ async fn a_push_is_cut_to_what_one_request_may_carry() {
     let relay = TestRelay::start().await;
     let device = Device::new();
     let mut between = Between::new(relay.transport());
-    between.limits = Limits { body: 1000, ..Limits::DEFAULT };
+    between.limits = Some(Limits { body: 1000, ..Limits::DEFAULT });
     let appends = between.appends.clone();
     let client = device.open(between, "notes", 1).await;
     let opened = appends.load(Ordering::SeqCst);

@@ -212,7 +212,8 @@ pub type Answer = dyn Fn(&mut Written) + Send + Sync;
 /// relay as it is.
 pub struct Between {
     pub relay: Relay,
-    pub limits: Limits,
+    /// What it announces instead of the relay's limits, if anything.
+    pub limits: Option<Limits>,
     pub tamper: Option<Arc<Tamper>>,
     pub appends: Arc<AtomicUsize>,
     /// Holds each append until every transport sharing it has one waiting:
@@ -229,7 +230,7 @@ impl Between {
     pub fn new(relay: Relay) -> Self {
         Self {
             relay,
-            limits: Limits::DEFAULT,
+            limits: None,
             tamper: None,
             appends: Arc::default(),
             together: None,
@@ -245,7 +246,10 @@ impl Transport for Between {
     }
 
     async fn limits(&self) -> Result<Limits, TransportError> {
-        Ok(self.limits)
+        match self.limits {
+            Some(limits) => Ok(limits),
+            None => self.relay.limits().await,
+        }
     }
 
     async fn append(&self, stream: &StreamName, batch: &Batch) -> Result<Written, TransportError> {
