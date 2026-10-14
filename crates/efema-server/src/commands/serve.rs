@@ -24,9 +24,12 @@ pub fn run(args: ServeArgs) -> Result<()> {
     let bytes = |value: Option<u64>, default: usize| -> Result<usize> {
         value.map_or(Ok(default), |v| usize::try_from(v).context("the size is larger than this machine addresses"))
     };
+    let body = bytes(args.max_body, defaults.body)?;
     let limits = Limits {
-        body: bytes(args.max_body, defaults.body)?,
-        entry: bytes(args.max_entry, defaults.entry)?,
+        body,
+        // A body set below the entry default takes the entry down with it:
+        // an operator who lowers one limit is not made to lower two.
+        entry: bytes(args.max_entry, defaults.entry.min(body))?,
         quota: args.space_quota.unwrap_or(defaults.quota),
         rate: args.rate,
     };

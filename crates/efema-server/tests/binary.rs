@@ -3,7 +3,8 @@
 //! The relay tests check the protocol in-process; these check the seams a
 //! process adds: the address it prints, the lock on its directory, what
 //! survives a kill, what the listings show, keys handed out and revoked from
-//! another process while the relay runs, and plain HTTP from another machine.
+//! another process while the relay runs, the limits it will not start with,
+//! and plain HTTP from another machine.
 
 mod common;
 
@@ -271,6 +272,41 @@ fn a_busy_port_fails_with_the_address() {
     let output = Command::new(BIN).args(["serve", "--listen", &address, "--data"]).arg(dir.path()).output().unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains(&format!("cannot listen on {address}")), "{output:?}");
+}
+
+#[test]
+fn an_operator_only_lowers_the_limits() {
+    // On a busy port: a relay that took the limits would fail there, saying
+    // so, instead of serving for ever.
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = taken.local_addr().unwrap().to_string();
+    let dir = tempfile::tempdir().unwrap();
+    let start = |limits: &[&str]| {
+        let output = Command::new(BIN)
+            .args(["serve", "--listen", &address])
+            .args(limits)
+            .arg("--data")
+            .arg(dir.path())
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{limits:?}");
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+    for (limits, said) in [
+        (&["--max-body", "16MiB"][..], "cannot listen on"),
+        (&["--max-body", "16777217"], "the body limit is from 1 to 16777216 bytes, not 16777217"),
+        (&["--max-body", "0"], "the body limit is from 1"),
+        (&["--max-body", "1MiB", "--max-entry", "1MiB"], "cannot listen on"),
+        (&["--max-body", "1MiB", "--max-entry", "1048577"], "the entry limit is from 1 byte to the body limit"),
+        (&["--max-entry", "0"], "the entry limit is from 1 byte"),
+        (&["--rate", "0"], "the rate is at least one request a minute"),
+        (&["--rate", "1"], "cannot listen on"),
+        // Lowering the body alone takes the entry down with it.
+        (&["--max-body", "4MiB"], "cannot listen on"),
+    ] {
+        let stderr = start(limits);
+        assert!(stderr.contains(said), "{limits:?}: {stderr}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

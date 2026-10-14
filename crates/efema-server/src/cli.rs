@@ -42,7 +42,8 @@ pub struct ServeArgs {
     #[arg(long = "max-body", env = "EFEMA_MAX_BODY", value_name = "SIZE", value_parser = size)]
     pub max_body: Option<u64>,
 
-    /// The largest entry [default: 8MiB]
+    /// The largest entry, at most the body [default: 8MiB, or the body if
+    /// that is less]
     #[arg(long = "max-entry", env = "EFEMA_MAX_ENTRY", value_name = "SIZE", value_parser = size)]
     pub max_entry: Option<u64>,
 

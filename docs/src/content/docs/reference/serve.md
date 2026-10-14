@@ -20,7 +20,7 @@ address until stopped. Devices reach it with access keys handed out by
 | `--listen <ADDRESS>` | `127.0.0.1:2451` | the address and port to listen on; port `0` lets the system choose |
 | `--trust-proxy <ADDRESS>` | none | an address or network - `10.0.0.2`, `172.18.0.0/16` - to trust as the reverse proxy, besides loopback; repeat for more |
 | `--max-body <SIZE>` | `16MiB`, the most | the largest request - a batch - the relay takes |
-| `--max-entry <SIZE>` | `8MiB` | the largest entry, at most the body |
+| `--max-entry <SIZE>` | `8MiB`, or the body if that is less | the largest entry, at most the body |
 | `--space-quota <SIZE>` | `8GiB` | the entry data one space may hold, all its streams together |
 | `--rate <PER_MINUTE>` | `600` | requests one access key may make in a minute; as many may come at once |
 | `--data <DIR>` | the local data directory | where the database lives - see [Commands](/efema/reference/commands/#the-data-directory) |
