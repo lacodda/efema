@@ -1,7 +1,7 @@
 use std::io::IsTerminal;
 
 use anyhow::{Context, Result};
-use efema_server::Relay;
+use efema_server::{Config, Limits, Network, Relay};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -20,8 +20,25 @@ pub fn run(args: ServeArgs) -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
+    let defaults = Limits::default();
+    let bytes = |value: Option<u64>, default: usize| -> Result<usize> {
+        value.map_or(Ok(default), |v| usize::try_from(v).context("the size is larger than this machine addresses"))
+    };
+    let limits = Limits {
+        body: bytes(args.max_body, defaults.body)?,
+        entry: bytes(args.max_entry, defaults.entry)?,
+        quota: args.space_quota.unwrap_or(defaults.quota),
+        rate: args.rate,
+    };
+    // Loopback always: the relay's own machine is where its operator looks
+    // at it.
+    let mut trusted = Network::LOOPBACK.to_vec();
+    trusted.extend(args.trust_proxy);
+    let config = Config { limits, trusted };
+
     let dir = args.data.dir()?;
-    let relay = Relay::open(&dir).with_context(|| format!("cannot open the relay in {}", dir.display()))?;
+    let relay =
+        Relay::open(&dir, config.clone()).with_context(|| format!("cannot open the relay in {}", dir.display()))?;
 
     let runtime = tokio::runtime::Runtime::new().context("cannot start the async runtime")?;
     runtime.block_on(async {
@@ -35,6 +52,15 @@ pub fn run(args: ServeArgs) -> Result<()> {
             "efema-server {} listening on http://{address}, data in {}",
             env!("CARGO_PKG_VERSION"),
             relay.data_dir().display()
+        );
+        let trusted: Vec<String> = config.trusted.iter().map(ToString::to_string).collect();
+        info!(
+            "answering this machine and HTTPS forwarded by {}; batches up to {} bytes, entries up to {}, {} bytes a space, {} requests a minute a key",
+            trusted.join(", "),
+            config.limits.body,
+            config.limits.entry,
+            config.limits.quota,
+            config.limits.rate
         );
         relay.serve(listener, stopped()).await.context("the relay stopped serving")?;
         info!("stopped");

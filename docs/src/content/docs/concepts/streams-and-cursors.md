@@ -25,6 +25,17 @@ position 40.
 A stream exists from its first batch on. There is no "create" call, and in
 this version no delete.
 
+## Spaces
+
+Streams live in **spaces**. A space is what an access key opens: the relay's
+operator makes it, and hands out keys to it - one that reads its streams, or
+one that reads and writes them ([`keys`](/efema/reference/keys/)). A device
+never names its space - its key does - and every name it uses is a stream of
+that space. So a name is unique within a space, not on the relay: two people
+on one relay each have their own `notes`, and neither can reach the other's.
+One key reaches every stream of its space, so an app makes as many streams as
+it needs without asking the operator for anything.
+
 ## Batches and positions
 
 A device writes a **batch**: one or more entries, each an arbitrary run of

@@ -311,7 +311,7 @@ fn the_protocol_page_names_every_refusal_and_no_other() {
 
 #[test]
 fn the_protocol_page_states_the_limits_the_relay_enforces() {
-    let rows = protocol_rows("## Limits");
+    let rows = protocol_rows("## Ceilings and defaults");
     let value = |name: &str| -> String {
         rows.iter().find(|row| row[0] == name).unwrap_or_else(|| panic!("no `{name}` row in the limits table"))[1]
             .split_whitespace()
@@ -320,7 +320,10 @@ fn the_protocol_page_states_the_limits_the_relay_enforces() {
             .to_string()
     };
     let expected = [
-        ("request body", limits::MAX_BODY_BYTES.to_string()),
+        ("request body, at most and by default", limits::MAX_BODY_BYTES.to_string()),
+        ("entry, by default", limits::ENTRY_BYTES_DEFAULT.to_string()),
+        ("space quota, by default", limits::SPACE_QUOTA_DEFAULT.to_string()),
+        ("requests per key in a minute, by default", limits::RATE_DEFAULT.to_string()),
         ("entries in a page, by default", limits::PAGE_ENTRIES_DEFAULT.to_string()),
         ("entries in a page, at most", limits::PAGE_ENTRIES_MAX.to_string()),
         ("entry data in a page", limits::PAGE_BYTES.to_string()),
@@ -332,7 +335,49 @@ fn the_protocol_page_states_the_limits_the_relay_enforces() {
     for (name, number) in expected {
         assert_eq!(value(name), number, "the protocol page says {name} is {}, the relay has {number}", value(name));
     }
-    assert_eq!(rows.len(), 8, "the limits table has a row this test does not check");
+    assert_eq!(rows.len(), 11, "the limits table has a row this test does not check");
+}
+
+#[test]
+fn the_protocol_page_gives_every_field_of_the_announced_limits() {
+    // Every key the relay sends, in order, and no other: an encoded record
+    // is a map of as many keys as the table has rows.
+    let rows = protocol_rows("### limits");
+    let keys: Vec<String> = rows.iter().map(|row| row[0].clone()).collect();
+    let expected: Vec<String> = (0..rows.len()).map(|key| key.to_string()).collect();
+    assert_eq!(keys, expected, "the limits table skips or repeats a key");
+    let encoded = efema_proto::wire::encode(&efema_proto::wire::Limits::DEFAULT);
+    assert_eq!(usize::from(encoded[0] & 0x1f), rows.len(), "the record has another number of fields than the page");
+}
+
+/// The long options `efema-server <args> --help` lists, without clap's own.
+fn options(args: &[&str]) -> Vec<String> {
+    let mut args = args.to_vec();
+    args.push("--help");
+    let options: Vec<String> = help(&args)
+        .lines()
+        .filter_map(|line| line.split_whitespace().find(|word| word.starts_with("--")))
+        .map(|word| word.trim_end_matches(',').to_string())
+        .filter(|option| option != "--help" && option != "--version")
+        .collect();
+    assert!(!options.is_empty(), "could not read the options of {args:?}");
+    options
+}
+
+#[test]
+fn every_option_is_on_its_commands_page() {
+    for (args, page) in [
+        (vec!["serve"], "serve"),
+        (vec!["streams"], "streams"),
+        (vec!["keys"], "keys"),
+        (vec!["keys", "add"], "keys"),
+        (vec!["keys", "revoke"], "keys"),
+    ] {
+        let text = read(format!("docs/src/content/docs/reference/{page}.md"));
+        for option in options(&args) {
+            assert!(text.contains(&format!("`{option}")), "reference/{page}.md does not document {option} of {args:?}");
+        }
+    }
 }
 
 #[test]

@@ -20,3 +20,6 @@ earlier one says so; the earlier one is marked superseded rather than deleted.
 | [0013](0013-a-batch-is-known-by-what-it-holds.md) | A batch is known by what it holds, and written once | Accepted |
 | [0014](0014-what-is-pushed-waits-on-the-device-sealed.md) | What is pushed waits on the device, sealed and cut, until the relay has it | Accepted |
 | [0015](0015-lacodda-tear-in-this-workspace.md) | lacodda-tear - torn connections for tests - lives here, with a version of its own | Accepted |
+| [0016](0016-an-access-key-opens-a-space.md) | An access key opens a space; a key reads, or reads and writes | Accepted |
+| [0017](0017-limits-are-announced-and-a-refused-queue-is-cut-again.md) | Limits are the operator's, announced per key; a queue refused as too large is cut again | Accepted |
+| [0018](0018-the-relay-answers-only-through-the-door.md) | The relay answers its own machine and HTTPS through the door, and nothing else | Accepted |

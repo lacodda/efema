@@ -2,9 +2,9 @@
 
 use std::ops::ControlFlow;
 use std::sync::{Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use efema_proto::wire::{Batch, Entry, ProblemCode, Watch};
+use efema_proto::wire::{Batch, Entry, Limits, ProblemCode, Watch};
 use efema_proto::{Cursor, Epoch, StreamId, StreamName, chain};
 use lacodda_seal::{Key, KeyId, LockedKey};
 
@@ -30,11 +30,13 @@ pub enum Secret<'a> {
 /// the relay has it, opens what it pulls, and remembers how far it has read.
 ///
 /// ```no_run
-/// use efema::{Client, Epoch, Relay, Secret, State};
+/// use efema::{AccessKey, Client, Epoch, Relay, Secret, State};
 ///
 /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// let state = State::open("sync.sqlite3")?;
-/// let relay = Relay::new("https://sync.example.com")?;
+/// // Handed out by the relay's operator: `efema-server keys add`.
+/// let key: AccessKey = std::env::var("EFEMA_KEY")?.parse()?;
+/// let relay = Relay::new("https://sync.example.com", key)?;
 /// let notes = Client::open(relay, &state, "notes".parse()?, Epoch(1), Secret::Passphrase(b"a long passphrase")).await?;
 ///
 /// notes.push([b"a change".as_slice(), b"another one"]).await?;
@@ -71,6 +73,11 @@ struct Current {
     lock: LockedKey,
     generation: u32,
 }
+
+/// How old the limits kept in the device's state may get before a send that
+/// reached the relay asks for them again: an operator who raised a limit is
+/// heard within a day, one who lowered it at the next refusal.
+const LIMITS_STALE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// What one entry is for the device.
 enum Step {
@@ -184,13 +191,20 @@ impl<T: Transport> Client<T> {
                 (known.stream, Current { lock, generation: known.generation }, key)
             }
             None => {
-                let (id, current, key) = establish(&transport, &stream, epoch, secret).await?;
+                // The relay is needed now anyway, and its limits say whether
+                // the key writes: a key that only reads cannot create a
+                // stream.
+                let limits = transport.limits().await?;
+                let (id, current, key) = establish(&transport, &stream, epoch, secret, &limits).await?;
                 blocking({
                     let state = state.clone();
                     let stream = stream.clone();
                     let lock = current.lock.to_bytes();
                     let generation = current.generation;
-                    move || state.join(&stream, id, &lock, generation)
+                    move || {
+                        state.join(&stream, id, &lock, generation)?;
+                        state.keep_limits(&stream, id, &limits)
+                    }
                 })
                 .await?;
                 (id, current, key)
@@ -217,8 +231,9 @@ impl<T: Transport> Client<T> {
     /// everything the device has waiting for the stream - these items last.
     ///
     /// The items are kept before anything is sent, in the device's
-    /// [`State`]: sealed, and cut into batches that each fit in one request,
-    /// each to land whole - all on consecutive positions, or none. Once kept,
+    /// [`State`]: sealed, and cut into batches that each fit the limits the
+    /// relay announced - kept in the state too, so a push needs no network -
+    /// each to land whole: all on consecutive positions, or none. Once kept,
     /// they outlive a torn connection, a relay that is down and the app
     /// closing: they wait, and go with the next push or [`Client::send`]. A
     /// batch whose answer was lost goes again as it was, and the relay, which
@@ -229,38 +244,32 @@ impl<T: Transport> Client<T> {
     /// [`Error::Unsent`] when the items are kept but not all sent: its source
     /// says why - [`Error::Transport`] for a relay that cannot be reached,
     /// worth a [`Client::send`] later; [`Error::EpochBehind`],
-    /// [`Error::StreamGone`] or [`Error::StreamReplaced`] for a stream that
-    /// will not take them. Before anything is kept: [`Error::ItemTooLarge`]
-    /// when one item cannot fit in a request uncompressed - whether it
-    /// compresses does not change the limit - and [`Error::StreamGone`] when
-    /// the app forgot the stream since this client opened it.
+    /// [`Error::StreamGone`], [`Error::StreamReplaced`] or
+    /// [`Error::QuotaExceeded`] for a stream that will not take them. Before
+    /// anything is kept: [`Error::ReadOnly`] when the access key only reads;
+    /// [`Error::ItemTooLarge`] when one item cannot fit what the relay takes
+    /// uncompressed - whether it compresses does not change the limit - and
+    /// [`Error::StreamGone`] when the app forgot the stream since this client
+    /// opened it.
     pub async fn push<I>(&self, items: I) -> Result<Sent, Error>
     where
         I: IntoIterator,
         I::Item: AsRef<[u8]>,
     {
-        let limits = self.transport.limits().await?;
-        let sizer = Sizer::new(self.epoch, limits.max_body);
-        let mut batches: Vec<Vec<Vec<u8>>> = Vec::new();
-        let mut body = usize::MAX;
+        let sizer = Sizer::new(self.epoch, &self.limits_to_write().await?);
+        let mut entries: Vec<Vec<u8>> = Vec::new();
         for item in items {
             let item = item.as_ref();
             if item.len() > sizer.max_item() {
                 return Err(Error::ItemTooLarge { size: item.len(), limit: sizer.max_item() });
             }
-            let entry = envelope::seal(&self.key, self.epoch, self.state.device(), item, self.compression)?;
-            match batches.last_mut() {
-                Some(batch) if sizer.fits(body, batch.len(), entry.len()) => {
-                    body = sizer.grow(body, batch.len(), entry.len());
-                    batch.push(entry);
-                }
-                _ => {
-                    body = sizer.grow(sizer.empty(), 0, entry.len());
-                    batches.push(vec![entry]);
-                }
-            }
+            entries.push(envelope::seal(&self.key, self.epoch, self.state.device(), item, self.compression)?);
         }
-        if !batches.is_empty() {
+        if !entries.is_empty() {
+            let counts = sizer.cut(&entries);
+            let mut entries = entries.into_iter();
+            let batches: Vec<Vec<Vec<u8>>> =
+                counts.into_iter().map(|count| entries.by_ref().take(count).collect()).collect();
             blocking({
                 let state = self.state.clone();
                 let (stream, id, epoch) = (self.stream.clone(), self.id, self.epoch);
@@ -276,12 +285,18 @@ impl<T: Transport> Client<T> {
     /// back, or when the app starts.
     ///
     /// Each batch leaves the device once the relay has it; a batch whose
-    /// answer was lost stays, and goes again as it was.
+    /// answer was lost stays, and goes again as it was. When the relay
+    /// refuses a batch as too large - its operator lowered a limit since the
+    /// batch was cut - the client asks for the limits again and cuts
+    /// everything waiting to them, in order, then goes on: the relay does not
+    /// have a batch it refused, and none behind it was sent yet.
     ///
     /// # Errors
     ///
     /// [`Error::Unsent`] when something still waits, with the reason as its
-    /// source, as for [`Client::push`].
+    /// source, as for [`Client::push`] - [`Error::ItemTooLarge`] for an item
+    /// waiting that is larger than what the relay takes now; only forgetting
+    /// the stream ([`State::forget`]) clears that.
     pub async fn send(&self) -> Result<Sent, Error> {
         let turn = self.state.sending(&self.stream);
         let _turn = turn.lock().await;
@@ -290,6 +305,9 @@ impl<T: Transport> Client<T> {
         // that did not leave the queue waits for the next send rather than
         // holding this one in a loop.
         let mut after = 0;
+        // And the queue cut again at most once: a relay that refuses what
+        // was cut to its own limits is not argued with.
+        let mut cut_again = false;
         let stopped = loop {
             let waiting = blocking({
                 let state = self.state.clone();
@@ -302,13 +320,26 @@ impl<T: Transport> Client<T> {
                     after = waiting.id;
                     self.send_batch(waiting).await
                 }
-                Ok(None) => return Ok(sent),
+                Ok(None) => {
+                    if sent.batches > 0 {
+                        self.refresh_stale_limits().await;
+                    }
+                    return Ok(sent);
+                }
                 Err(e) => Err(e),
             };
             match result {
                 Ok(items) => {
                     sent.items += items;
                     sent.batches += 1;
+                }
+                Err(e) if refused_as_too_large(&e) && !cut_again => {
+                    cut_again = true;
+                    match self.cut_again().await {
+                        // Cut again, the queue starts over with new batches.
+                        Ok(()) => after = 0,
+                        Err(e) => break e,
+                    }
                 }
                 Err(e) => break e,
             }
@@ -340,6 +371,76 @@ impl<T: Transport> Client<T> {
         let state = self.state.clone();
         blocking(move || state.sent(waiting.id)).await?;
         Ok(count)
+    }
+
+    /// Cuts everything waiting for the stream again, to the limits the relay
+    /// announces now.
+    async fn cut_again(&self) -> Result<(), Error> {
+        let limits = self.refresh_limits().await?;
+        let state = self.state.clone();
+        let (stream, id) = (self.stream.clone(), self.id);
+        blocking(move || {
+            state.recut(&stream, id, |epoch, entries| {
+                let sizer = Sizer::new(epoch, &limits);
+                // A sealed entry is cut no further: one larger than the
+                // relay takes now waits, and says so.
+                if let Some(entry) = entries.iter().find(|entry| entry.len() > sizer.entry_room()) {
+                    return Err(Error::ItemTooLarge { size: entry.len(), limit: sizer.entry_room() });
+                }
+                Ok(sizer.cut(entries))
+            })
+        })
+        .await
+    }
+
+    /// The limits the relay last announced for this device's key, as the
+    /// device's state keeps them; the protocol's defaults if the relay was
+    /// never asked. No network.
+    async fn limits(&self) -> Result<Limits, Error> {
+        let state = self.state.clone();
+        let stream = self.stream.clone();
+        let kept = blocking(move || state.limits(&stream)).await?;
+        Ok(kept.map_or(Limits::DEFAULT, |(limits, _)| limits))
+    }
+
+    /// Asks the relay for its limits, and keeps the answer.
+    pub(crate) async fn refresh_limits(&self) -> Result<Limits, Error> {
+        let limits = self.transport.limits().await?;
+        let state = self.state.clone();
+        let (stream, id) = (self.stream.clone(), self.id);
+        blocking(move || state.keep_limits(&stream, id, &limits)).await?;
+        Ok(limits)
+    }
+
+    /// Asks again for limits older than [`LIMITS_STALE`], or never asked
+    /// for. Only after a send that reached the relay, so a device without
+    /// the network does not pay for it; a failure keeps what was kept.
+    async fn refresh_stale_limits(&self) {
+        let state = self.state.clone();
+        let stream = self.stream.clone();
+        let stale = match blocking(move || state.limits(&stream)).await {
+            Ok(Some((_, at))) => SystemTime::now().duration_since(at).is_ok_and(|age| age > LIMITS_STALE),
+            Ok(None) => true,
+            Err(_) => false,
+        };
+        if stale {
+            let _ = self.refresh_limits().await;
+        }
+    }
+
+    /// The limits to write with - or [`Error::ReadOnly`] when the key only
+    /// reads. A kept answer that said so is checked with the relay first:
+    /// the operator may have given the key more since.
+    async fn limits_to_write(&self) -> Result<Limits, Error> {
+        let limits = self.limits().await?;
+        if limits.write {
+            return Ok(limits);
+        }
+        match self.refresh_limits().await {
+            Ok(fresh) if fresh.write => Ok(fresh),
+            Err(e @ Error::Unauthorized { .. }) => Err(e),
+            _ => Err(Error::ReadOnly { stream: self.stream.clone() }),
+        }
     }
 
     /// What waits on this device to be sent to the stream.
@@ -376,11 +477,11 @@ impl<T: Transport> Client<T> {
     /// [`Error::Inauthentic`] when the relay sent entries that do not hold
     /// together or were changed.
     pub async fn pull(&self) -> Result<Pulled, Error> {
-        let limits = self.transport.limits().await?;
+        let limits = self.limits().await?;
         let cursor = self.cursor().await?;
         let page = self
             .transport
-            .read(&self.stream, Some(&cursor), limits.page_entries)
+            .read(&self.stream, Some(&cursor), page_entries(&limits))
             .await
             .map_err(|e| classify_read(e, &self.stream, &cursor))?;
         if page.stream != self.id {
@@ -563,8 +664,8 @@ impl<T: Transport> Client<T> {
         let mut previous = from;
         let mut newest = self.current();
         let mut relocked = false;
-        let limit = self.transport.limits().await?.page_entries;
-        scan(&self.transport, &self.stream, Some(from), limit, |id, entry| {
+        let limit = page_entries(&self.limits().await?);
+        scan(&self.transport, &self.stream, Some(from), limit, limit, |id, entry| {
             if until.is_some_and(|until| entry.seq > until) {
                 return Ok(ControlFlow::Break(()));
             }
@@ -622,17 +723,17 @@ impl<T: Transport> Client<T> {
     ///
     /// [`Error::Transport`] when the relay cannot be reached.
     pub async fn wait(&self, timeout: Duration) -> Result<bool, Error> {
-        let limits = self.transport.limits().await?;
+        let limits = self.limits().await?;
         let cursor = self.cursor().await?;
         let watch = Watch { stream: self.stream.clone(), cursor: Some(cursor) };
-        let heads = self.transport.wait(&[watch], timeout.min(limits.wait_max)).await?;
+        let heads = self.transport.wait(&[watch], timeout.min(Duration::from_secs(limits.wait_max))).await?;
         Ok(!heads.heads.is_empty())
     }
 
-    /// The largest item one push can carry, in bytes.
+    /// The largest item one push can carry, in bytes, by the limits the
+    /// relay last announced. No network.
     pub async fn max_item_len(&self) -> Result<usize, Error> {
-        let limits = self.transport.limits().await?;
-        Ok(Sizer::new(self.epoch, limits.max_body).max_item())
+        Ok(Sizer::new(self.epoch, &self.limits().await?).max_item())
     }
 
     /// The stream's key. Whoever holds these bytes can read the stream: keep
@@ -696,9 +797,14 @@ async fn establish<T: Transport>(
     stream: &StreamName,
     epoch: Epoch,
     secret: Secret<'_>,
+    limits: &Limits,
 ) -> Result<(StreamId, Current, Key), Error> {
-    if let Some((first, entry)) = first_key_entry(transport, stream).await? {
-        return join(transport, stream, first, entry, secret).await;
+    let page = page_entries(limits);
+    if let Some((first, entry)) = first_key_entry(transport, stream, page).await? {
+        return join(transport, stream, first, entry, secret, page).await;
+    }
+    if !limits.write {
+        return Err(Error::ReadOnly { stream: stream.clone() });
     }
     let Secret::Passphrase(passphrase) = secret else {
         return Err(Error::NoStreamKey { stream: stream.clone() });
@@ -721,13 +827,13 @@ async fn establish<T: Transport>(
     // Another device may have created a key for the same stream at the same
     // moment. The first key entry in the stream is the stream's key, for
     // everyone: read it back, and give up ours if it lost.
-    let (first, entry) = first_key_entry(transport, stream)
+    let (first, entry) = first_key_entry(transport, stream, page)
         .await?
         .ok_or_else(|| not_protocol(transport, "a key was written to the stream and is not there".into()))?;
     if entry.lock.key_id() == key.id() {
         return Ok((first.stream, Current { lock: entry.lock, generation: 0 }, key));
     }
-    join(transport, stream, first, entry, Secret::Passphrase(passphrase)).await
+    join(transport, stream, first, entry, Secret::Passphrase(passphrase), page).await
 }
 
 /// Takes a stream's key with a secret, on a device that has not synced the
@@ -739,6 +845,7 @@ async fn join<T: Transport>(
     first: Cursor,
     entry: KeyEntry,
     secret: Secret<'_>,
+    page: usize,
 ) -> Result<(StreamId, Current, Key), Error> {
     let generation_of = |entry: &KeyEntry, key: &Key, seq: u64| {
         entry.generation(key).ok_or_else(|| Error::Inauthentic { stream: stream.clone(), seq })
@@ -762,7 +869,7 @@ async fn join<T: Transport>(
 
     // The passphrase may have been changed since the stream was created: try
     // the later locks of the same key, the newest first.
-    let later = key_entries_after(transport, stream, first, entry.lock.key_id()).await?;
+    let later = key_entries_after(transport, stream, first, entry.lock.key_id(), page).await?;
     for (seq, candidate) in later.iter().rev() {
         let key = match unlock(&candidate.lock, passphrase, stream).await {
             Ok(key) => key,
@@ -790,11 +897,12 @@ async fn join<T: Transport>(
 async fn first_key_entry<T: Transport>(
     transport: &T,
     stream: &StreamName,
+    page: usize,
 ) -> Result<Option<(Cursor, KeyEntry)>, Error> {
     let mut found = None;
     // The key is the first entry of every stream a client created: one entry
     // answers, where a full page would carry megabytes of the stream along.
-    let read = scan(transport, stream, None, 1, |id, entry| {
+    let read = scan(transport, stream, None, 1, page, |id, entry| {
         if lacodda_seal::is_locked_key(&entry.data) {
             found = Some((entry.cursor(id), KeyEntry::from_bytes(&entry.data)?));
             return Ok(ControlFlow::Break(()));
@@ -815,10 +923,10 @@ async fn key_entries_after<T: Transport>(
     stream: &StreamName,
     after: Cursor,
     key: KeyId,
+    page: usize,
 ) -> Result<Vec<(u64, KeyEntry)>, Error> {
     let mut found = Vec::new();
-    let limit = transport.limits().await?.page_entries;
-    scan(transport, stream, Some(after), limit, |_, entry| {
+    scan(transport, stream, Some(after), page, page, |_, entry| {
         if lacodda_seal::is_locked_key(&entry.data) {
             let read = KeyEntry::from_bytes(&entry.data)?;
             if read.lock.key_id() == key {
@@ -832,16 +940,17 @@ async fn key_entries_after<T: Transport>(
 }
 
 /// Reads `stream` page by page after `after`, the first page `limit`
-/// entries long, handing each entry and the stream's incarnation to `visit`
-/// until it breaks or the stream ends. `None` when there is no such stream.
+/// entries long and the rest `page_entries`, handing each entry and the
+/// stream's incarnation to `visit` until it breaks or the stream ends. `None`
+/// when there is no such stream.
 async fn scan<T: Transport>(
     transport: &T,
     stream: &StreamName,
     mut after: Option<Cursor>,
     mut limit: usize,
+    page_entries: usize,
     mut visit: impl FnMut(StreamId, &Entry) -> Result<ControlFlow<()>, Error>,
 ) -> Result<Option<()>, Error> {
-    let page_entries = transport.limits().await?.page_entries;
     loop {
         let page = match (transport.read(stream, after.as_ref(), limit).await, &after) {
             (Ok(page), _) => page,
@@ -917,7 +1026,7 @@ pub(crate) fn classify_read(e: TransportError, stream: &StreamName, cursor: &Cur
             Error::CursorAhead { stream, cursor: cursor.seq, head }
         }
         Some(ProblemCode::CursorDiverged) => Error::CursorDiverged { stream, seq: cursor.seq },
-        _ => Error::Transport(e),
+        _ => Error::from(e),
     }
 }
 
@@ -930,10 +1039,23 @@ fn write_error(e: TransportError, stream: &StreamName, ours: Epoch) -> Error {
             }
             ProblemCode::StreamNotFound => Error::StreamGone { stream },
             ProblemCode::StreamReplaced => Error::StreamReplaced { stream },
-            _ => Error::Transport(e),
+            ProblemCode::Forbidden => Error::ReadOnly { stream },
+            ProblemCode::QuotaExceeded => Error::QuotaExceeded { stream, quota: problem.limit.unwrap_or_default() },
+            _ => Error::from(e),
         },
-        _ => Error::Transport(e),
+        _ => Error::from(e),
     }
+}
+
+/// Whether the relay refused a batch for its size - which means it does not
+/// have the batch.
+fn refused_as_too_large(e: &Error) -> bool {
+    matches!(e, Error::Transport(e) if e.code() == Some(&ProblemCode::TooLarge))
+}
+
+/// Entries in a page, as the relay announced it.
+fn page_entries(limits: &Limits) -> usize {
+    usize::try_from(limits.page_entries).unwrap_or(usize::MAX).max(1)
 }
 
 fn not_protocol<T: Transport>(transport: &T, reason: String) -> TransportError {
@@ -950,20 +1072,42 @@ async fn blocking<R: Send + 'static>(work: impl FnOnce() -> R + Send + 'static) 
 }
 
 /// The size of a batch's CBOR body, entry by entry - so a push is cut into
-/// batches that each fit the relay's limit, exactly rather than roughly.
+/// batches that each fit the relay's limits, exactly rather than roughly.
 ///
 /// A batch is `{0: epoch, 1: [entries...], 2: stream}`: a map head, three
 /// keys, the epoch, an array head and a byte string head per entry, and the
 /// sixteen bytes of the stream's identity.
 struct Sizer {
     max_body: usize,
+    max_entry: usize,
     fixed: usize,
 }
 
 impl Sizer {
-    fn new(epoch: Epoch, max_body: usize) -> Self {
+    fn new(epoch: Epoch, limits: &Limits) -> Self {
         let fixed = 1 + 1 + head_len(u64::from(epoch.0)) + 1 + 1 + head_len(16) + 16;
-        Self { max_body, fixed }
+        let bytes = |limit: u64| usize::try_from(limit).unwrap_or(usize::MAX);
+        Self { max_body: bytes(limits.body), max_entry: bytes(limits.entry), fixed }
+    }
+
+    /// Batch sizes, in entries, for `entries` in order: each batch as full as
+    /// the body limit lets it be. Every entry fits on its own.
+    fn cut(&self, entries: &[Vec<u8>]) -> Vec<usize> {
+        let mut counts: Vec<usize> = Vec::new();
+        let mut body = 0;
+        for entry in entries {
+            match counts.last_mut() {
+                Some(count) if self.fits(body, *count, entry.len()) => {
+                    body = self.grow(body, *count, entry.len());
+                    *count += 1;
+                }
+                _ => {
+                    body = self.grow(self.empty(), 0, entry.len());
+                    counts.push(1);
+                }
+            }
+        }
+        counts
     }
 
     /// The body of a batch with no entries.
@@ -981,16 +1125,23 @@ impl Sizer {
         self.grow(body, count, len) <= self.max_body
     }
 
-    /// The largest item that fits in a batch of its own.
-    fn max_item(&self) -> usize {
+    /// The largest sealed entry the relay takes: no larger than its entry
+    /// limit, and in a batch of its own no larger than its body limit.
+    fn entry_room(&self) -> usize {
         let room = self.max_body.saturating_sub(self.fixed + head_len(1));
         // The entry and its byte string head share the room; the head's
         // length depends on the entry's, so try each head length.
-        [9, 5, 3, 2, 1]
+        let in_a_body = [9, 5, 3, 2, 1]
             .into_iter()
             .filter_map(|head| room.checked_sub(head).filter(|entry| head_len(*entry as u64) == head))
             .max()
-            .map_or(0, |entry| entry.saturating_sub(ENTRY_OVERHEAD))
+            .unwrap_or(0);
+        in_a_body.min(self.max_entry)
+    }
+
+    /// The largest item that, sealed, the relay takes.
+    fn max_item(&self) -> usize {
+        self.entry_room().saturating_sub(ENTRY_OVERHEAD)
     }
 }
 
@@ -1010,11 +1161,15 @@ mod tests {
     use super::*;
     use efema_proto::wire;
 
+    fn body(max_body: u64) -> Limits {
+        Limits { body: max_body, entry: u64::MAX, ..Limits::DEFAULT }
+    }
+
     #[test]
     fn the_sizer_measures_a_batch_as_the_encoder_writes_it() {
         let stream = Some(StreamId::from_bytes([1; 16]));
         for epoch in [Epoch(0), Epoch(24), Epoch(70_000)] {
-            let sizer = Sizer::new(epoch, usize::MAX);
+            let sizer = Sizer::new(epoch, &body(u64::MAX));
             let mut body = sizer.empty();
             let mut entries: Vec<Vec<u8>> = Vec::new();
             for len in [0, 1, 23, 24, 255, 256, 65_535, 65_536, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3] {
@@ -1029,12 +1184,36 @@ mod tests {
     #[test]
     fn the_largest_item_fits_and_one_byte_more_does_not() {
         for max_body in [200, 1000, 70_000, 16 * 1024 * 1024] {
-            let sizer = Sizer::new(Epoch(1), max_body);
+            let sizer = Sizer::new(Epoch(1), &body(max_body as u64));
             let item = sizer.max_item();
             let fits = |len: usize| sizer.grow(sizer.empty(), 0, len + ENTRY_OVERHEAD) <= max_body;
             assert!(fits(item), "the largest item does not fit {max_body}");
             assert!(!fits(item + 1), "one byte more still fits {max_body}");
         }
-        assert_eq!(Sizer::new(Epoch(1), 10).max_item(), 0);
+        assert_eq!(Sizer::new(Epoch(1), &body(10)).max_item(), 0);
+        // The entry limit, when it is the smaller one.
+        let limits = Limits { body: 1 << 20, entry: 1000, ..Limits::DEFAULT };
+        assert_eq!(Sizer::new(Epoch(1), &limits).max_item(), 1000 - ENTRY_OVERHEAD);
+    }
+
+    #[test]
+    fn a_cut_fills_each_batch_to_the_body_and_keeps_the_order() {
+        let sizer = Sizer::new(Epoch(1), &body(300));
+        let entries: Vec<Vec<u8>> = [100, 100, 100, 250, 1, 1].iter().map(|len| vec![7u8; *len]).collect();
+        let counts = sizer.cut(&entries);
+        assert_eq!(counts.iter().sum::<usize>(), entries.len());
+        assert_eq!(counts, [2, 1, 3]);
+        let mut at = 0;
+        for count in counts {
+            let batch = &entries[at..at + count];
+            let encoded = wire::encode(&Batch {
+                epoch: Epoch(1),
+                entries: batch.to_vec(),
+                stream: Some(StreamId::from_bytes([1; 16])),
+            });
+            assert!(encoded.len() <= 300, "a batch of {} bytes", encoded.len());
+            at += count;
+        }
+        assert!(sizer.cut(&[]).is_empty());
     }
 }

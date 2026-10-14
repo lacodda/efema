@@ -9,7 +9,13 @@
 //!
 //! What waits to be sent is kept sealed, cut into the batches it will be
 //! sent as: a batch sent again after a lost answer has to be the same bytes
-//! for the relay to know it, so nothing in a queued batch ever changes.
+//! for the relay to know it, so nothing in a queued batch ever changes. The
+//! one exception is a queue the relay refused as too large: the relay does
+//! not have a batch it refused, and none after it was sent, so the whole
+//! queue is cut again - in one transaction, in the same order.
+//!
+//! Next to each stream, the limits the relay last announced for the device's
+//! access key: a push cuts its batches to them without asking the network.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -18,13 +24,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use efema_proto::wire::{self, Limits};
 use efema_proto::{Cursor, Epoch, Hash, StreamId, StreamName};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::Error;
 
 /// The schema version this release writes and reads (`PRAGMA user_version`).
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// Migrations, in order: index `i` takes the file from version `i` to
 /// `i + 1`. An applied migration is never edited - a change is a new one.
@@ -114,6 +121,13 @@ BEGIN
     SELECT RAISE(ABORT, 'a queued entry leaves only with its batch')
     WHERE EXISTS (SELECT 1 FROM unsent WHERE id = OLD.batch);
 END;
+"#,
+    r#"
+-- The limits the relay last announced for the device's access key, as it
+-- sent them (CBOR), and when: a push cuts its batches to them without the
+-- network. Empty until the relay is first asked.
+ALTER TABLE streams ADD COLUMN limits BLOB;
+ALTER TABLE streams ADD COLUMN limits_at INTEGER;
 "#,
 ];
 
@@ -450,6 +464,116 @@ impl State {
         read.map_err(|source| self.error(source))
     }
 
+    /// The limits the relay last announced for `stream`, and when; `None` if
+    /// it was never asked - or answered something this release does not
+    /// read, which asking again will mend.
+    pub(crate) fn limits(&self, stream: &StreamName) -> Result<Option<(Limits, SystemTime)>, Error> {
+        let row: Option<(Option<Vec<u8>>, Option<i64>)> = self
+            .conn()
+            .query_row("SELECT limits, limits_at FROM streams WHERE name = ?1", [stream.as_str()], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .optional()
+            .map_err(|source| self.error(source))?;
+        Ok(match row {
+            Some((Some(bytes), Some(at))) => wire::decode::<Limits>(&bytes)
+                .ok()
+                .map(|limits| (limits, UNIX_EPOCH + Duration::from_secs(at.max(0) as u64))),
+            _ => None,
+        })
+    }
+
+    /// Keeps the limits the relay announced for the incarnation `id` of
+    /// `stream`.
+    pub(crate) fn keep_limits(&self, stream: &StreamName, id: StreamId, limits: &Limits) -> Result<(), Error> {
+        self.conn()
+            .execute(
+                "UPDATE streams SET limits = ?1, limits_at = ?2 WHERE name = ?3 AND stream = ?4",
+                params![wire::encode(limits), unix_now(), stream.as_str(), id.as_bytes()],
+            )
+            .map(drop)
+            .map_err(|source| self.error(source))
+    }
+
+    /// Cuts what waits for the incarnation `id` of `stream` again, in one
+    /// transaction: the entries in the order they were queued, each run of
+    /// one epoch handed to `cut`, which says how many entries go in each new
+    /// batch. A batch keeps the time its first entry was queued. When `cut`
+    /// fails, the queue stays as it was.
+    ///
+    /// Only for a queue the relay refused as too large: a batch that left
+    /// the device may be on the relay, and cut again it would land twice.
+    pub(crate) fn recut(
+        &self,
+        stream: &StreamName,
+        id: StreamId,
+        mut cut: impl FnMut(Epoch, &[Vec<u8>]) -> Result<Vec<usize>, Error>,
+    ) -> Result<(), Error> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|source| self.error(source))?;
+        let read = (|| {
+            let batches = tx
+                .prepare("SELECT id, epoch, queued_at FROM unsent WHERE name = ?1 AND stream = ?2 ORDER BY id")?
+                .query_map(params![stream.as_str(), id.as_bytes()], |row| {
+                    Ok((row.get::<_, i64>(0)?, Epoch(row.get(1)?), row.get::<_, i64>(2)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            // Runs of one epoch: a batch is written in one epoch, so no cut
+            // may join two.
+            let mut runs: Vec<(Epoch, Vec<Vec<u8>>, Vec<i64>)> = Vec::new();
+            for (batch, epoch, queued_at) in &batches {
+                let entries = tx
+                    .prepare("SELECT data FROM unsent_entries WHERE batch = ?1 ORDER BY idx")?
+                    .query_map([batch], |row| row.get(0))?
+                    .collect::<Result<Vec<Vec<u8>>, _>>()?;
+                match runs.last_mut() {
+                    Some((last, data, times)) if last == epoch => {
+                        times.extend(std::iter::repeat_n(*queued_at, entries.len()));
+                        data.extend(entries);
+                    }
+                    _ => runs.push((*epoch, entries.clone(), vec![*queued_at; entries.len()])),
+                }
+            }
+            Ok::<_, rusqlite::Error>((batches, runs))
+        })();
+        let (batches, runs) = read.map_err(|source| self.error(source))?;
+
+        let mut cut_again: Vec<(Epoch, i64, Vec<Vec<u8>>)> = Vec::new();
+        for (epoch, data, times) in runs {
+            let counts = cut(epoch, &data)?;
+            debug_assert_eq!(counts.iter().sum::<usize>(), data.len(), "a cut covers every entry once");
+            let mut entries = data.into_iter();
+            let mut first = 0;
+            for count in counts {
+                cut_again.push((epoch, times[first], entries.by_ref().take(count).collect()));
+                first += count;
+            }
+        }
+
+        let write = (|| {
+            // Oldest first: the schema lets batches leave the queue in order
+            // only.
+            for (batch, _, _) in &batches {
+                tx.execute("DELETE FROM unsent WHERE id = ?1", [batch])?;
+            }
+            for (epoch, queued_at, entries) in &cut_again {
+                tx.execute(
+                    "INSERT INTO unsent (name, stream, epoch, queued_at) VALUES (?1, ?2, ?3, ?4)",
+                    params![stream.as_str(), id.as_bytes(), epoch.0, queued_at],
+                )?;
+                let batch = tx.last_insert_rowid();
+                let mut insert =
+                    tx.prepare_cached("INSERT INTO unsent_entries (batch, idx, data) VALUES (?1, ?2, ?3)")?;
+                for (index, data) in entries.iter().enumerate() {
+                    insert.execute(params![batch, index as i64, data])?;
+                }
+            }
+            Ok::<_, rusqlite::Error>(())
+        })();
+        write.map_err(|source| self.error(source))?;
+        tx.commit().map_err(|source| self.error(source))
+    }
+
     /// Takes a batch the relay has out of the queue.
     pub(crate) fn sent(&self, batch: i64) -> Result<(), Error> {
         self.conn().execute("DELETE FROM unsent WHERE id = ?1", [batch]).map(drop).map_err(|source| self.error(source))
@@ -714,6 +838,68 @@ mod tests {
         assert_eq!(state.known(&name("s")).unwrap().unwrap().generation, 1);
         state.queue(&name("s"), id, Epoch(1), &[entries(&["a"])]).unwrap();
         assert_eq!(state.queued(&name("s")).unwrap().items, 1);
+    }
+
+    #[test]
+    fn the_announced_limits_are_kept_for_the_incarnation() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = State::open(dir.path().join("sync.sqlite3")).unwrap();
+        let id = StreamId::from_bytes([3; 16]);
+        state.join(&name("s"), id, b"lock", 0).unwrap();
+        assert!(state.limits(&name("s")).unwrap().is_none());
+        let limits = Limits { write: false, body: 2000, ..Limits::DEFAULT };
+        state.keep_limits(&name("s"), StreamId::from_bytes([4; 16]), &limits).unwrap();
+        assert!(state.limits(&name("s")).unwrap().is_none(), "kept for another incarnation");
+        state.keep_limits(&name("s"), id, &limits).unwrap();
+        let (kept, at) = state.limits(&name("s")).unwrap().unwrap();
+        assert_eq!(kept, limits);
+        assert!(SystemTime::now().duration_since(at).unwrap() < Duration::from_secs(60));
+        // Something this release cannot read is as good as nothing.
+        state.conn().execute("UPDATE streams SET limits = x'00'", []).unwrap();
+        assert!(state.limits(&name("s")).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_queue_is_cut_again_in_its_order_and_epochs() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = State::open(dir.path().join("sync.sqlite3")).unwrap();
+        let id = StreamId::from_bytes([3; 16]);
+        state.join(&name("s"), id, b"lock", 0).unwrap();
+        state.join(&name("t"), StreamId::from_bytes([5; 16]), b"lock", 0).unwrap();
+        state.queue(&name("s"), id, Epoch(1), &[entries(&["a", "b", "c"]), entries(&["d"])]).unwrap();
+        state.queue(&name("t"), StreamId::from_bytes([5; 16]), Epoch(1), &[entries(&["other"])]).unwrap();
+        state.queue(&name("s"), id, Epoch(2), &[entries(&["e", "f"])]).unwrap();
+
+        // One entry a batch.
+        let mut runs = Vec::new();
+        state
+            .recut(&name("s"), id, |epoch, data| {
+                runs.push((epoch, data.len()));
+                Ok(vec![1; data.len()])
+            })
+            .unwrap();
+        assert_eq!(runs, [(Epoch(1), 4), (Epoch(2), 2)], "runs of one epoch, in order");
+        let mut seen = Vec::new();
+        while let Some(waiting) = state.next_unsent(&name("s"), id, 0).unwrap() {
+            seen.push((waiting.epoch, waiting.entries.clone()));
+            state.sent(waiting.id).unwrap();
+        }
+        let one = |e: u32, t: &str| (Epoch(e), entries(&[t]));
+        assert_eq!(seen, [one(1, "a"), one(1, "b"), one(1, "c"), one(1, "d"), one(2, "e"), one(2, "f")]);
+        assert_eq!(state.queued(&name("t")).unwrap().items, 1, "another stream's queue was touched");
+    }
+
+    #[test]
+    fn a_cut_that_fails_leaves_the_queue_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = State::open(dir.path().join("sync.sqlite3")).unwrap();
+        let id = StreamId::from_bytes([3; 16]);
+        state.join(&name("s"), id, b"lock", 0).unwrap();
+        state.queue(&name("s"), id, Epoch(1), &[entries(&["a", "b"])]).unwrap();
+        let failed = state.recut(&name("s"), id, |_, _| Err(Error::ItemTooLarge { size: 9, limit: 1 }));
+        assert!(matches!(failed, Err(Error::ItemTooLarge { .. })), "{failed:?}");
+        let waiting = state.next_unsent(&name("s"), id, 0).unwrap().unwrap();
+        assert_eq!(waiting.entries, entries(&["a", "b"]));
     }
 
     #[test]

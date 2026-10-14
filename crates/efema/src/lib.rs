@@ -16,12 +16,27 @@
 //! - [`State`] - what a device remembers between runs: its identity, and for
 //!   each stream the cursor, the locked key and what waits to be sent. One
 //!   file per device.
-//! - [`Relay`] - the relay to talk to; it implements [`Transport`].
+//! - [`Relay`] - the relay to talk to, with the [`AccessKey`] its operator
+//!   handed out; it implements [`Transport`].
 //! - [`Client`] - one device's view of one stream: [`push`](Client::push),
 //!   [`send`](Client::send), [`pull`](Client::pull), [`ack`](Client::ack),
 //!   [`wait`](Client::wait),
 //!   [`change_passphrase`](Client::change_passphrase), and
 //!   [`doctor`](Client::doctor) to report on all of it.
+//!
+//! # Access
+//!
+//! A relay answers only devices with an access key, which opens one *space*
+//! of the relay: its streams, under names of their own. A key reads the
+//! space, or reads and writes it - [`Error::ReadOnly`] when a device with a
+//! key that reads tries to write. The relay's operator hands keys out and
+//! revokes them ([`Error::Unauthorized`]). An access key decides who reaches
+//! the sealed entries; the stream's key below decides who can open them.
+//!
+//! What the relay holds a key to - the largest request, the largest entry,
+//! how much its space may hold - it announces; the client keeps the answer in
+//! the device's state, cuts its batches to it without the network, and asks
+//! again when the relay refuses something as too large.
 //!
 //! # Keys
 //!
@@ -75,13 +90,14 @@ mod transport;
 
 pub use client::{Client, Pulled, Received, Secret, Sent};
 pub use doctor::{KeyReport, QUEUE_STALE, RelayReport, Report};
-pub use efema_proto::{Cursor, Epoch, StreamId, StreamName};
+pub use efema_proto::wire::Limits;
+pub use efema_proto::{ACCESS_KEY_PREFIX, AccessKey, Cursor, Epoch, ParseAccessKeyError, StreamId, StreamName};
 pub use envelope::{Compression, ENTRY_OVERHEAD};
 pub use error::Error;
 pub use lacodda_seal::{Key, KeyId, LockedKey};
 pub use relay::{InvalidUrl, Relay};
 pub use state::{DeviceId, Queue, State};
-pub use transport::{Limits, Transport, TransportError};
+pub use transport::{Transport, TransportError};
 
 /// The wire format and the hash chain, for writing a [`Transport`].
 pub use efema_proto::{chain, wire};

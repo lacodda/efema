@@ -3,12 +3,12 @@
 use std::fmt;
 use std::time::Duration;
 
-use efema_proto::wire::{self, Batch, Heads, Page, Problem, Watch, Written};
-use efema_proto::{Cursor, MEDIA_TYPE, StreamName};
-use reqwest::header::{CONTENT_TYPE, HeaderValue};
-use reqwest::{Response, Url};
+use efema_proto::wire::{self, Batch, Heads, Limits, Page, Problem, Watch, Written};
+use efema_proto::{AccessKey, Cursor, MEDIA_TYPE, StreamName};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
+use reqwest::{RequestBuilder, Response, Url};
 
-use crate::transport::{Limits, Transport, TransportError};
+use crate::transport::{Transport, TransportError};
 
 /// How long a write or a read may take as a whole. Generous: a full request
 /// body is 16 MiB, and a phone on a poor network moves that slowly.
@@ -19,21 +19,32 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// round trip around it.
 const WAIT_SLACK: Duration = Duration::from_secs(30);
 
-/// An efema relay, reached over HTTP or HTTPS.
+/// An efema relay, reached over HTTPS - or over plain HTTP on this machine -
+/// with an access key that opens one of its spaces.
 ///
 /// HTTPS is verified against the platform's trust store, so a relay behind a
 /// proxy with a private certificate authority is trusted once that authority
-/// is installed on the device.
+/// is installed on the device. Plain HTTP is for a relay on the device
+/// itself: the key goes with every request, and over plain HTTP across a
+/// network anyone on the way would read it. The relay refuses such a request
+/// too; this refuses to send it.
 ///
 /// ```
-/// let relay = efema::Relay::new("https://sync.example.com/efema/")?;
+/// let key: efema::AccessKey = std::env::var("EFEMA_KEY")
+///     .unwrap_or_else(|_| format!("efema_{}", "0".repeat(64)))
+///     .parse()?;
+/// let relay = efema::Relay::new("https://sync.example.com/efema/", key.clone())?;
 /// assert_eq!(relay.to_string(), "https://sync.example.com/efema");
-/// # Ok::<(), efema::InvalidUrl>(())
+/// assert!(efema::Relay::new("http://sync.example.com", key.clone()).is_err());
+/// assert!(efema::Relay::new("http://127.0.0.1:2451", key).is_ok());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[derive(Clone)]
 pub struct Relay {
     base: String,
     http: reqwest::Client,
+    /// `Bearer <key>`, marked sensitive so no HTTP layer prints it.
+    authorization: HeaderValue,
 }
 
 /// Why a text is not the address of a relay.
@@ -45,13 +56,15 @@ pub struct InvalidUrl {
 }
 
 impl Relay {
-    /// The relay at `url`: `http://` or `https://`, and a path if the relay is
-    /// served under one.
+    /// The relay at `url`, reached with `key`: `https://`, or `http://` to
+    /// this machine (`localhost`, `127.0.0.1`, `::1`), and a path if the relay
+    /// is served under one.
     ///
     /// # Errors
     ///
-    /// [`InvalidUrl`] when `url` is not an HTTP address.
-    pub fn new(url: &str) -> Result<Self, InvalidUrl> {
+    /// [`InvalidUrl`] when `url` is not an HTTP address, or is plain HTTP to
+    /// another machine.
+    pub fn new(url: &str, key: AccessKey) -> Result<Self, InvalidUrl> {
         let invalid = |reason: &str| InvalidUrl { url: url.to_string(), reason: reason.to_string() };
         let parsed = Url::parse(url).map_err(|e| invalid(&e.to_string()))?;
         if !matches!(parsed.scheme(), "http" | "https") {
@@ -63,12 +76,25 @@ impl Relay {
         if parsed.query().is_some() || parsed.fragment().is_some() {
             return Err(invalid("a relay address has no query and no fragment"));
         }
+        if parsed.scheme() == "http" && !on_this_machine(&parsed) {
+            return Err(invalid(
+                "plain http goes only to this machine (localhost, 127.0.0.1, ::1): to another, the access key would cross the network in the clear - use https",
+            ));
+        }
         let http = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .user_agent(concat!("efema/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| invalid(&e.to_string()))?;
-        Ok(Self { base: parsed.as_str().trim_end_matches('/').to_string(), http })
+        let mut authorization =
+            HeaderValue::from_str(&format!("Bearer {}", key.expose())).expect("an access key is printable ASCII");
+        authorization.set_sensitive(true);
+        Ok(Self { base: parsed.as_str().trim_end_matches('/').to_string(), http, authorization })
+    }
+
+    /// A request with the key on it.
+    fn authorized(&self, request: RequestBuilder) -> RequestBuilder {
+        request.header(AUTHORIZATION, self.authorization.clone())
     }
 
     fn url(&self, path: &str) -> String {
@@ -102,7 +128,7 @@ impl Relay {
             wire::decode(&body).map_err(not_protocol)
         } else {
             let problem: Problem = wire::decode(&body).map_err(not_protocol)?;
-            Err(TransportError::Refused { at: self.base.clone(), problem })
+            Err(TransportError::Refused { at: self.base.clone(), problem: Box::new(problem) })
         }
     }
 }
@@ -125,13 +151,15 @@ impl Transport for Relay {
     }
 
     async fn limits(&self) -> Result<Limits, TransportError> {
-        Ok(Limits::V1)
+        let request = self.http.get(self.url(&format!("{}/limits", efema_proto::API_PREFIX))).timeout(REQUEST_TIMEOUT);
+        let response = self.authorized(request).send().await.map_err(|e| self.unreachable(e))?;
+        self.answer(response).await
     }
 
     async fn append(&self, stream: &StreamName, batch: &Batch) -> Result<Written, TransportError> {
+        let request = self.http.post(self.entries(stream));
         let response = self
-            .http
-            .post(self.entries(stream))
+            .authorized(request)
             .header(CONTENT_TYPE, HeaderValue::from_static(MEDIA_TYPE))
             .timeout(REQUEST_TIMEOUT)
             .body(wire::encode(batch))
@@ -147,7 +175,8 @@ impl Transport for Relay {
         if let Some(cursor) = after {
             url.push_str(&format!("&after={cursor}"));
         }
-        let response = self.http.get(url).timeout(REQUEST_TIMEOUT).send().await.map_err(|e| self.unreachable(e))?;
+        let request = self.http.get(url).timeout(REQUEST_TIMEOUT);
+        let response = self.authorized(request).send().await.map_err(|e| self.unreachable(e))?;
         self.answer(response).await
     }
 
@@ -156,8 +185,18 @@ impl Transport for Relay {
         for watch in watches {
             url.push_str(&format!("&watch={watch}"));
         }
-        let response =
-            self.http.get(url).timeout(timeout + WAIT_SLACK).send().await.map_err(|e| self.unreachable(e))?;
+        let request = self.http.get(url).timeout(timeout + WAIT_SLACK);
+        let response = self.authorized(request).send().await.map_err(|e| self.unreachable(e))?;
         self.answer(response).await
     }
+}
+
+/// Whether `url` leads to this machine: the only place plain HTTP may carry
+/// a key.
+fn on_this_machine(url: &Url) -> bool {
+    // An IPv6 host comes in brackets.
+    let Some(host) = url.host_str().map(|host| host.trim_start_matches('[').trim_end_matches(']')) else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }

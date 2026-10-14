@@ -25,11 +25,14 @@ cannot read what it stores.
 
 ## A day in the life
 
-A relay, and a folder synced between a laptop and a desktop by `mini-vault`,
-the example app. Both edit `plan.md` before hearing from each other, and both
-versions survive:
+A relay, an access key to its space `home` for each device, and a folder
+synced between a laptop and a desktop by `mini-vault`, the example app. Both
+edit `plan.md` before hearing from each other, and both versions survive:
 
 ```console
+$ efema-server keys add home write --label laptop --data ./relay
+Key ff3c99f8 reads and writes space home. This is the only time it is shown:
+efema_2a619d3c0e80422cc6f162b9b76ed80927cabb6c1e31c26988a82bc610c8f55a
 $ mini-vault --relay http://127.0.0.1:2451 --folder ./laptop --state ./laptop-state sync --once
 applied 0 change(s), sent 3
 $ mini-vault --relay http://127.0.0.1:2451 --folder ./desktop --state ./desktop-state sync --once
@@ -38,14 +41,15 @@ $ mini-vault --relay http://127.0.0.1:2451 --folder ./desktop --state ./desktop-
 applied 0 change(s), sent 1
 $ mini-vault --relay http://127.0.0.1:2451 --folder ./laptop --state ./laptop-state sync --once
 applied 0 change(s), sent 2
-conflict: both versions kept, the other one as notes/plan (conflict 4d3934d1).md
+conflict: both versions kept, the other one as notes/plan (conflict 64b8f145).md
 $ mini-vault --relay http://127.0.0.1:2451 --folder ./laptop --state ./laptop-state doctor
-relay    http://127.0.0.1:2451 - answered in 3 ms
-stream   vault - stream 9d43e105, epoch 1, 7 entries
+relay    http://127.0.0.1:2451 - answered in 15 ms
+access   reads and writes - 47.8 KiB of 8.0 GiB in the space
+stream   vault - stream aec8e1aa, epoch 1, 7 entries
 cursor   at 5 - 2 entries to read
 queue    empty
-key      1005a7587958c346 - locked 2026-10-11 (today), argon2id 64 MiB × 3 × 4
-device   22f164e5
+key      164324ac6cbe7a06 - locked 2026-10-14 (today), argon2id 64 MiB × 3 × 4
+device   985605d0
 epoch    1 - written, and read up to
 ```
 
@@ -53,15 +57,15 @@ What the relay's operator sees is positions, sizes and links - the first entry
 is the stream's key, locked under the passphrase; the rest is ciphertext:
 
 ```console
-$ efema-server streams vault --data ./relay
+$ efema-server streams home/vault --data ./relay
 SEQ  EPOCH      SIZE  HASH
-  1  1         172 B  64035340
-  2  1         123 B  8e510f17
-  3  1      47.0 KiB  001f9967
-  4  1         139 B  4ddf0520
-  5  1         199 B  d3ca7bbc
-  6  1         183 B  3f14e4b4
-  7  1         184 B  4bc3d32d
+  1  1         172 B  78d045f3
+  2  1          98 B  b0f7e1a6
+  3  1         105 B  f3f50392
+  4  1      47.0 KiB  72c6d156
+  5  1         152 B  cabe44d5
+  6  1         138 B  ab167db7
+  7  1         151 B  4e116ce4
 ```
 
 ## What you get
@@ -69,6 +73,10 @@ SEQ  EPOCH      SIZE  HASH
 - **Sealed on the device.** A client cannot be made without the stream's
   passphrase or key, and has no way to send an entry unsealed. The relay
   cannot read, forge or alter an entry, nor tell which device wrote it.
+- **Safe to leave reachable.** Every request shows an access key to one space
+  of the relay - one that reads, or one that reads and writes. Each key is
+  held to limits the relay announces, and plain HTTP from another machine is
+  refused: the relay answers only through a proxy that takes HTTPS.
 - **One order for everyone.** Batches land whole, on consecutive positions,
   and every device reads the same sequence however many wrote at once.
 - **Cursors that cannot lie.** After a restore from an old backup, a device is
@@ -113,14 +121,15 @@ The model, sealing, the threat model, every command and the protocol:
 
 ## Status
 
-0.4.0 is the relay and the client library: entries compressed and sealed on
-the device, kept there until the relay has them, and written once however
+0.5.0 is the relay and the client library, safe to leave behind an HTTPS
+proxy: access keys to spaces, read or write; limits per key, announced and
+followed; plain HTTP from outside refused. Entries are compressed and sealed
+on the device, kept there until the relay has them, and written once however
 often a broken network sends them again. Tests listed in the threat model show
-that the relay keeps nothing readable and that a torn connection loses and
-doubles nothing. Alongside ship two crates of the line,
+what it promises. Alongside ship two crates of the line,
 [`lacodda-seal`](https://docs.rs/lacodda-seal) and
-[`lacodda-tear`](https://docs.rs/lacodda-tear). No access control and no TLS
-of its own yet: run the relay on loopback or behind a proxy. Changes:
+[`lacodda-tear`](https://docs.rs/lacodda-tear). The first app to sync through
+it comes next. Changes:
 [CHANGELOG](https://github.com/lacodda/efema/blob/main/CHANGELOG.md).
 
 ## Contributing

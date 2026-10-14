@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use efema::wire::{Batch, Heads, Page, Watch, Written};
-use efema::{Client, Cursor, Epoch, Limits, Relay, Secret, State, StreamName, Transport, TransportError};
+use efema::{AccessKey, Client, Cursor, Epoch, Limits, Relay, Secret, State, StreamName, Transport, TransportError};
 use tempfile::TempDir;
 use tokio::sync::{Barrier, oneshot};
 use tokio::task::JoinHandle;
@@ -22,6 +22,8 @@ pub const NEW_PASSPHRASE: &[u8] = b"a longer and a better passphrase";
 pub struct TestRelay {
     pub url: String,
     pub addr: std::net::SocketAddr,
+    /// A key that writes to the relay's space `test`.
+    pub key: AccessKey,
     stop: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<std::io::Result<()>>>,
     pub dir: TempDir,
@@ -33,7 +35,16 @@ impl TestRelay {
     }
 
     pub async fn start_in(dir: TempDir) -> Self {
-        let relay = efema_server::Relay::open(dir.path()).unwrap();
+        Self::start_in_with(dir, efema_server::Config::default()).await
+    }
+
+    pub async fn start_with(config: efema_server::Config) -> Self {
+        Self::start_in_with(tempfile::tempdir().unwrap(), config).await
+    }
+
+    pub async fn start_in_with(dir: TempDir, config: efema_server::Config) -> Self {
+        let key = hand_out(dir.path(), "test", efema_server::Access::Write);
+        let relay = efema_server::Relay::open(dir.path(), config).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let url = format!("http://{addr}");
@@ -41,7 +52,13 @@ impl TestRelay {
         let task = tokio::spawn(relay.serve(listener, async move {
             let _ = stopped.await;
         }));
-        Self { url, addr, stop: Some(stop), task: Some(task), dir }
+        Self { url, addr, key, stop: Some(stop), task: Some(task), dir }
+    }
+
+    /// A new key to `space`, handed out the way the operator does: to the
+    /// relay's database, while it runs.
+    pub fn key(&self, space: &str, access: efema_server::Access) -> AccessKey {
+        hand_out(self.dir.path(), space, access)
     }
 
     /// Stops the relay and hands back its directory.
@@ -56,8 +73,17 @@ impl TestRelay {
     }
 
     pub fn transport(&self) -> Relay {
-        Relay::new(&self.url).unwrap()
+        Relay::new(&self.url, self.key.clone()).unwrap()
     }
+
+    /// The relay, reached with another key.
+    pub fn with(&self, key: &AccessKey) -> Relay {
+        Relay::new(&self.url, key.clone()).unwrap()
+    }
+}
+
+fn hand_out(dir: &Path, space: &str, access: efema_server::Access) -> AccessKey {
+    efema_server::store::Store::open(dir).unwrap().add_key(&space.parse().unwrap(), access, "").unwrap()
 }
 
 /// A device: a state file of its own.
@@ -203,7 +229,7 @@ impl Between {
     pub fn new(relay: Relay) -> Self {
         Self {
             relay,
-            limits: Limits::V1,
+            limits: Limits::DEFAULT,
             tamper: None,
             appends: Arc::default(),
             together: None,
@@ -265,7 +291,7 @@ impl TornRelay {
 
     /// The relay as a client reaches it: through the proxy.
     pub fn through(&self) -> Relay {
-        Relay::new(&format!("http://{}", self.tear.addr())).unwrap()
+        Relay::new(&format!("http://{}", self.tear.addr()), self.relay.key.clone()).unwrap()
     }
 
     /// The relay as it is, around the proxy: what it really holds.

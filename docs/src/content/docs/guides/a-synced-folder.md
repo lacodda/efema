@@ -12,14 +12,20 @@ of the work is, written out.
 
 ## Run it
 
-A relay, and two folders that stand for two devices:
+A relay, a key to one of its spaces, and two folders that stand for two
+devices:
 
 ```console
+$ export MINI_VAULT_KEY="$(efema-server keys add home write --data ./relay)"
 $ efema-server serve --data ./relay
 $ export MINI_VAULT_PASSPHRASE='several random words, not these'
 $ cargo run -p mini-vault -- --relay http://127.0.0.1:2451 --folder ./laptop --state ./laptop-state sync
 $ cargo run -p mini-vault -- --relay http://127.0.0.1:2451 --folder ./desktop --state ./desktop-state sync
 ```
+
+The key goes in `MINI_VAULT_KEY` (or `--key`), the passphrase in
+`MINI_VAULT_PASSPHRASE`. Two devices may share a key or have one each - a key
+each lets one be revoked without the other.
 
 Each keeps its folder in sync until stopped: it sends what changed in the
 folder and applies what other devices sent, woken by the relay as soon as
@@ -38,27 +44,32 @@ $ mini-vault --relay http://127.0.0.1:2451 --folder ./desktop --state ./desktop-
 applied 0 change(s), sent 1
 $ mini-vault --relay http://127.0.0.1:2451 --folder ./laptop --state ./laptop-state sync --once
 applied 0 change(s), sent 2
-conflict: both versions kept, the other one as notes/plan (conflict 4d3934d1).md
+conflict: both versions kept, the other one as notes/plan (conflict 64b8f145).md
 $ mini-vault --relay http://127.0.0.1:2451 --folder ./desktop --state ./desktop-state sync --once
 applied 2 change(s), sent 0
-conflict: both versions kept, the other one as notes/plan (conflict 4d3934d1).md
+conflict: both versions kept, the other one as notes/plan (conflict 64b8f145).md
 $ ls laptop/notes
-2026  plan (conflict 4d3934d1).md  plan.md
+2026  plan (conflict 64b8f145).md  plan.md
 ```
 
 The laptop's edit reached the stream second and was made without seeing the
 desktop's, so it keeps the name, and the desktop's version - written by device
-`4d3934d1` - sits beside it on both devices. Lines from the relay's log of the
-same run, timestamps left out - positions and sizes, nothing more:
+`64b8f145` - sits beside it on both devices. Lines from the relay's log of the
+same run, timestamps left out - the stream with its space, positions and
+sizes, nothing more:
 
 ```console
-INFO vault: wrote 1 entry (172 bytes) at 1, epoch 1
-INFO vault: wrote 3 entries (48358 bytes) at 2..4, epoch 1
-INFO vault: read 4 entries after 0
-INFO vault: wrote 1 entry (199 bytes) at 5, epoch 1
-INFO vault: read 4 entries after 1
-INFO vault: wrote 2 entries (367 bytes) at 6..7, epoch 1
+INFO home/vault: wrote 1 entry (172 bytes) at 1, epoch 1
+INFO home/vault: wrote 3 entries (48287 bytes) at 2..4, epoch 1
+INFO home/vault: read 4 entries after 0
+INFO home/vault: wrote 1 entry (152 bytes) at 5, epoch 1
+INFO home/vault: read 4 entries after 1
+INFO home/vault: wrote 2 entries (289 bytes) at 6..7, epoch 1
 ```
+
+A third device with a key that only reads gets the folder, and nothing it
+changes goes anywhere: the relay will not take it, and the client does not
+keep it to send.
 
 ## What the app does
 

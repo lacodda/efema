@@ -1,6 +1,6 @@
 ---
 title: Syncing an app
-description: Use the efema client library in a Rust app - open a stream, push changes, pull and acknowledge, wait for news, keep working when the network breaks, change the passphrase, and handle what can go wrong.
+description: Use the efema client library in a Rust app - open a stream with an access key, push changes, pull and acknowledge, wait for news, keep working when the network breaks, change the passphrase, and handle what can go wrong.
 ---
 
 The [`efema`](https://docs.rs/efema) crate is what an app links to. It seals
@@ -16,10 +16,11 @@ $ cargo add tokio --features rt-multi-thread,macros
 ## Open a stream
 
 ```rust
-use efema::{Client, Epoch, Relay, Secret, State};
+use efema::{AccessKey, Client, Epoch, Relay, Secret, State};
 
 let state = State::open(data_dir.join("sync.sqlite3"))?;
-let relay = Relay::new("https://sync.example.com")?;
+let key: AccessKey = access_key.parse()?;
+let relay = Relay::new("https://sync.example.com", key)?;
 let notes = Client::open(
     relay,
     &state,
@@ -33,9 +34,12 @@ let notes = Client::open(
 - **`State`** is the device: its identity, and for each stream its cursor and
   the stream's locked key. One file per device, opened once, shared between
   the clients of all its streams. Only one process opens it at a time.
-- **`Relay`** is where the stream lives, `http://` or `https://`, with a path if
-  the relay is served under one. HTTPS is checked against the platform's
-  trust store.
+- **`Relay`** is where the stream lives, `https://` with a path if the relay
+  is served under one, and the **access key** its operator handed out
+  ([`keys`](/efema/reference/keys/)). The key opens one space of the relay;
+  stream names are names in that space. HTTPS is checked against the
+  platform's trust store. Plain `http://` is accepted only to this machine -
+  `localhost`, `127.0.0.1`, `::1` - since the key goes with every request.
 - **`Epoch(1)`** is the format of what this version of the app writes - see
   [Epochs](#epochs).
 - **The secret is required.** The first device to open a stream creates its
@@ -63,6 +67,14 @@ on consecutive positions, all or none. A push larger than that is cut into
 batches that each fit, each whole on its own. An item too large for a request
 of its own is refused before anything is kept - `notes.max_item_len()` says the
 limit, which is the same whether the item compresses or not.
+
+The limits are the relay's: it announces them for the device's key, and the
+client keeps them in the `State` - so a push is cut without the network, and
+a relay with lower limits than another is followed. If the operator lowers a
+limit while batches wait on the device, the relay refuses the first of them,
+and the client asks for the limits again, cuts what waits to them, in order,
+and sends it: each item still lands once. With a key that only reads, `push`
+is `Error::ReadOnly`, and nothing is kept.
 
 When sending stops - no network, a relay that is down -
 `Error::Unsent` says how many items wait on the device, and its source says
@@ -159,9 +171,12 @@ The client does not retry on its own: when to try again - at once, in a
 minute, when the operating system says the network is back - is the app's to
 decide. Waiting does no harm; nothing is lost while it waits.
 
-If what waits can never go - the stream is gone from the relay, replaced, or
-moved to an epoch only a newer app writes - the source of `Unsent` says so,
-and every later send stops the same way. `State::forget(&stream)` lets the
+If what waits cannot go by waiting - the stream is gone from the relay,
+replaced, or moved to an epoch only a newer app writes; the space is full
+(`QuotaExceeded`, until the operator gives it room); the key was revoked
+(`Unauthorized`) or only reads (`ReadOnly`); an item is larger than the relay
+takes now (`ItemTooLarge`) - the source of `Unsent` says so, and every later
+send stops the same way. `State::forget(&stream)` lets the
 device start over, and lets go of what waited with the rest; the app's own
 data still has every change, and it sends what the stream lacks once it has
 joined again (see [When the relay is not what it was](#when-the-relay-is-not-what-it-was)).
@@ -213,6 +228,17 @@ the app changes its format, it opens the stream with the next epoch:
   update, rather than misreading the newer format;
 - an older app can no longer write: `Error::EpochBehind`.
 
+## When the key is not what it was
+
+| Error | What happened | What to do |
+| --- | --- | --- |
+| `Unauthorized` | the relay does not take the key: it was revoked, or never handed out there | ask the operator for a key, and open again with it |
+| `ReadOnly` | the key reads the space and does not write to it | nothing for this device to send; a key that writes, if it should |
+| `QuotaExceeded` | the space holds all it may | the operator gives it room; what was pushed waits on the device |
+
+A refusal for going over the relay's rate - `rate_limited` in an
+`Error::Transport` - says in how many seconds to ask again.
+
 ## When the relay is not what it was
 
 Four errors say the relay's history is no longer the one this device read:
@@ -242,21 +268,24 @@ println!("{}", notes.doctor().await);
 ```
 
 ```console
-relay    http://127.0.0.1:2451 - answered in 3 ms
-stream   vault - stream 9d43e105, epoch 1, 7 entries
+relay    http://127.0.0.1:2451 - answered in 15 ms
+access   reads and writes - 47.8 KiB of 8.0 GiB in the space
+stream   vault - stream aec8e1aa, epoch 1, 7 entries
 cursor   at 5 - 2 entries to read
 queue    empty
-key      1005a7587958c346 - locked 2026-10-11 (today), argon2id 64 MiB × 3 × 4
-device   22f164e5
+key      164324ac6cbe7a06 - locked 2026-10-14 (today), argon2id 64 MiB × 3 × 4
+device   985605d0
 epoch    1 - written, and read up to
 ```
 
-One report, the same in every app: whether the relay answers, how far behind
-the device is, what waits on it to be sent, which key the stream is sealed
-under (the same id on every device), how old its lock is and how many times
-the passphrase was changed. `report.problems()` lists what is wrong, one line
-each, with what to do about it - items that have waited more than a day among
-them. Show it under your app's own `doctor` command.
+One report, the same in every app: whether the relay answers, what the access
+key may do and how full its space is, how far behind the device is, what waits
+on it to be sent, which key the stream is sealed under (the same id on every
+device), how old its lock is and how many times the passphrase was changed.
+`report.problems()` lists what is wrong, one line each, with what to do about
+it - items that have waited more than a day, a space nine tenths full, items
+waiting with a key that only reads. Show it under your app's own `doctor`
+command.
 
 ## Related
 

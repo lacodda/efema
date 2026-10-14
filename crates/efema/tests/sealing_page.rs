@@ -59,7 +59,7 @@ fn the_sealing_page_gives_the_formats_the_code_writes() {
         assert!(envelope.contains(code), "`{code}` moved in the code");
         assert!(page.contains(page_says), "the sealing page does not say `{page_says}`");
     }
-    assert_eq!(efema::Limits::V1.max_body, 16 * 1024 * 1024, "the page gives the expansion bound as 16 MiB");
+    assert_eq!(efema::Limits::DEFAULT.body as usize, 16 * 1024 * 1024, "the page gives the expansion bound as 16 MiB");
     let default = lacodda_seal::KdfParams::DEFAULT;
     let stated = format!(
         "{} MiB, {} passes, {} lanes",

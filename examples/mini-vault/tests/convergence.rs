@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use efema::{Client, Epoch, Relay, Secret, State, Transport};
+use efema::{AccessKey, Client, Epoch, Relay, Secret, State, Transport};
 use lacodda_tear::{Cut, Tear};
 use mini_vault::Vault;
 use tempfile::TempDir;
@@ -16,22 +16,40 @@ struct Device {
     vault: Vault<Relay>,
 }
 
+/// Where a device reaches the relay, and with which key.
+#[derive(Clone)]
+struct Remote {
+    url: String,
+    key: AccessKey,
+}
+
+impl Remote {
+    fn relay(&self) -> Relay {
+        Relay::new(&self.url, self.key.clone()).unwrap()
+    }
+
+    /// The same relay, through a proxy at `address`.
+    fn through(&self, address: std::net::SocketAddr) -> Self {
+        Self { url: format!("http://{address}"), key: self.key.clone() }
+    }
+}
+
 impl Device {
-    async fn open(url: &str) -> Self {
-        Self::open_in(tempfile::tempdir().unwrap(), url).await
+    async fn open(remote: &Remote) -> Self {
+        Self::open_in(tempfile::tempdir().unwrap(), remote).await
     }
 
     /// The same device after the app closed and started again.
-    async fn restart(self, url: &str) -> Self {
+    async fn restart(self, remote: &Remote) -> Self {
         let Self { root, vault } = self;
         drop(vault);
-        Self::open_in(root, url).await
+        Self::open_in(root, remote).await
     }
 
-    async fn open_in(root: TempDir, url: &str) -> Self {
+    async fn open_in(root: TempDir, remote: &Remote) -> Self {
         let state = State::open(root.path().join("sync.sqlite3")).unwrap();
         let client = Client::open(
-            Relay::new(url).unwrap(),
+            remote.relay(),
             &state,
             "vault".parse().unwrap(),
             Epoch(1),
@@ -65,16 +83,19 @@ impl Device {
     }
 }
 
-async fn relay() -> (String, oneshot::Sender<()>, TempDir) {
+async fn relay() -> (Remote, oneshot::Sender<()>, TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    let relay = efema_server::Relay::open(dir.path()).unwrap();
+    let store = efema_server::store::Store::open(dir.path()).unwrap();
+    let key = store.add_key(&"vaults".parse().unwrap(), efema_server::Access::Write, "").unwrap();
+    drop(store);
+    let relay = efema_server::Relay::open(dir.path(), efema_server::Config::default()).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = oneshot::channel::<()>();
     tokio::spawn(relay.serve(listener, async move {
         let _ = stopped.await;
     }));
-    (url, stop, dir)
+    (Remote { url, key }, stop, dir)
 }
 
 /// Syncs every device until a round changes nothing anywhere.
@@ -88,8 +109,8 @@ async fn settle(devices: &mut [&mut Device]) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn edits_sent_at_once_converge_with_both_kept() {
-    let (url, _stop, _dir) = relay().await;
-    let (mut a, mut b) = (Device::open(&url).await, Device::open(&url).await);
+    let (remote, _stop, _dir) = relay().await;
+    let (mut a, mut b) = (Device::open(&remote).await, Device::open(&remote).await);
     a.write("plan.md", "v0");
     settle(&mut [&mut a, &mut b]).await;
 
@@ -111,8 +132,8 @@ async fn edits_sent_at_once_converge_with_both_kept() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_created_and_removed_before_it_comes_back_stays_removed() {
-    let (url, _stop, _dir) = relay().await;
-    let (mut a, mut b) = (Device::open(&url).await, Device::open(&url).await);
+    let (remote, _stop, _dir) = relay().await;
+    let (mut a, mut b) = (Device::open(&remote).await, Device::open(&remote).await);
     a.write("draft.md", "short-lived");
     a.vault.push().await.unwrap();
     std::fs::remove_file(a.folder().join("draft.md")).unwrap();
@@ -122,8 +143,8 @@ async fn a_file_created_and_removed_before_it_comes_back_stays_removed() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_edit_wins_over_a_removal_it_did_not_see() {
-    let (url, _stop, _dir) = relay().await;
-    let (mut a, mut b) = (Device::open(&url).await, Device::open(&url).await);
+    let (remote, _stop, _dir) = relay().await;
+    let (mut a, mut b) = (Device::open(&remote).await, Device::open(&remote).await);
     a.write("keep.md", "v0");
     settle(&mut [&mut a, &mut b]).await;
 
@@ -137,8 +158,8 @@ async fn an_edit_wins_over_a_removal_it_did_not_see() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn three_devices_converge() {
-    let (url, _stop, _dir) = relay().await;
-    let (mut a, mut b, mut c) = (Device::open(&url).await, Device::open(&url).await, Device::open(&url).await);
+    let (remote, _stop, _dir) = relay().await;
+    let (mut a, mut b, mut c) = (Device::open(&remote).await, Device::open(&remote).await, Device::open(&remote).await);
     a.write("shared.md", "v0");
     settle(&mut [&mut a, &mut b, &mut c]).await;
 
@@ -161,10 +182,10 @@ async fn three_devices_converge() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn changes_through_a_lost_answer_and_an_outage_arrive_once_after_a_restart() {
-    let (url, _stop, _dir) = relay().await;
-    let tear = Tear::start(url.trim_start_matches("http://").parse().unwrap()).await.unwrap();
-    let through = format!("http://{}", tear.addr());
-    let (mut a, mut b) = (Device::open(&through).await, Device::open(&url).await);
+    let (remote, _stop, _dir) = relay().await;
+    let tear = Tear::start(remote.url.trim_start_matches("http://").parse().unwrap()).await.unwrap();
+    let through = remote.through(tear.addr());
+    let (mut a, mut b) = (Device::open(&through).await, Device::open(&remote).await);
 
     // The relay takes the first change; its answer never reaches the device.
     a.write("trip.md", "written on a train");
@@ -186,7 +207,7 @@ async fn changes_through_a_lost_answer_and_an_outage_arrive_once_after_a_restart
     assert_eq!(b.files()["trip.md"], "written on a train");
     assert_eq!(b.files()["tunnel.md"], "written in a tunnel");
     assert_eq!(a.files(), b.files());
-    let stream = Relay::new(&url).unwrap().read(&"vault".parse().unwrap(), None, 1).await.unwrap();
+    let stream = remote.relay().read(&"vault".parse().unwrap(), None, 1).await.unwrap();
     // The key, and each change once.
     assert_eq!(stream.head, 3, "a change went into the stream more than once");
 }

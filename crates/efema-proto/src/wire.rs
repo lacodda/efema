@@ -249,6 +249,69 @@ pub struct Head {
     pub head: u64,
 }
 
+/// What a relay accepts from one access key, and what the key may do: the
+/// answer to `GET /v1/limits`.
+///
+/// A client cuts its batches and pages to these rather than to the
+/// protocol's ceilings in [`crate::limits`]: an operator may have set any of
+/// them lower. Sizes are in bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+#[cbor(map)]
+pub struct Limits {
+    /// Whether the key writes. A key that does not only reads: its writes are
+    /// refused with `forbidden`.
+    #[n(0)]
+    pub write: bool,
+    /// The largest request body - a batch, as CBOR.
+    #[n(1)]
+    pub body: u64,
+    /// The largest entry.
+    #[n(2)]
+    pub entry: u64,
+    /// Bytes of entry data the key's space may hold, all its streams together.
+    #[n(3)]
+    pub quota: u64,
+    /// Bytes of entry data the space holds at the moment of the answer.
+    #[n(4)]
+    pub used: u64,
+    /// Requests the key may make in a minute.
+    #[n(5)]
+    pub rate: u64,
+    /// Entries in a page when the reader does not say.
+    #[n(6)]
+    pub page_entries: u64,
+    /// The most entries a reader may ask for.
+    #[n(7)]
+    pub page_entries_max: u64,
+    /// Bytes of entry data in a page, beyond which it ends early.
+    #[n(8)]
+    pub page_bytes: u64,
+    /// The longest wait, in seconds.
+    #[n(9)]
+    pub wait_max: u64,
+    /// The most streams one wait may watch.
+    #[n(10)]
+    pub watches: u64,
+}
+
+impl Limits {
+    /// What a relay with its operator's defaults announces to a key that
+    /// writes, in a space that holds nothing yet.
+    pub const DEFAULT: Self = Self {
+        write: true,
+        body: crate::limits::MAX_BODY_BYTES as u64,
+        entry: crate::limits::ENTRY_BYTES_DEFAULT as u64,
+        quota: crate::limits::SPACE_QUOTA_DEFAULT,
+        used: 0,
+        rate: crate::limits::RATE_DEFAULT as u64,
+        page_entries: crate::limits::PAGE_ENTRIES_DEFAULT as u64,
+        page_entries_max: crate::limits::PAGE_ENTRIES_MAX as u64,
+        page_bytes: crate::limits::PAGE_BYTES as u64,
+        wait_max: crate::limits::WAIT_MAX.as_secs(),
+        watches: crate::limits::WATCHES_MAX as u64,
+    };
+}
+
 /// Why the relay refused a request: the body of every error response.
 ///
 /// `code` is for programs and never changes its spelling; `message` is for
@@ -269,9 +332,13 @@ pub struct Problem {
     /// The stream's epoch - with `epoch_behind`.
     #[n(3)]
     pub epoch: Option<Epoch>,
-    /// The limit that was exceeded, in bytes - with `too_large`.
+    /// The limit that was exceeded, in bytes - with `too_large` and
+    /// `quota_exceeded`.
     #[n(4)]
     pub limit: Option<u64>,
+    /// Seconds until the next request is let through - with `rate_limited`.
+    #[n(5)]
+    pub retry: Option<u64>,
 }
 
 /// The reasons a relay refuses a request. Each has one spelling on the wire,
@@ -301,6 +368,22 @@ pub enum ProblemCode {
     TooLarge,
     /// The body is not `application/cbor`.
     UnsupportedMediaType,
+    /// No access key, or one the relay does not know - never handed out, or
+    /// revoked.
+    Unauthorized,
+    /// The access key does not allow this: a key that only reads, sent to
+    /// write. Also a request for something the relay serves only on its own
+    /// machine.
+    Forbidden,
+    /// The request reached the relay over plain HTTP from outside: not
+    /// through a proxy that took it over HTTPS, and not from the relay's own
+    /// machine.
+    HttpsRequired,
+    /// The access key has made more requests than the relay allows in a
+    /// minute.
+    RateLimited,
+    /// The batch would take the space past the bytes it may hold.
+    QuotaExceeded,
     /// No such endpoint.
     NotFound,
     /// The endpoint exists, but not for this method.
@@ -314,7 +397,7 @@ pub enum ProblemCode {
 impl ProblemCode {
     /// Every code this version of the protocol defines - all but
     /// [`ProblemCode::Other`].
-    pub const KNOWN: [ProblemCode; 11] = [
+    pub const KNOWN: [ProblemCode; 16] = [
         Self::BadRequest,
         Self::StreamNotFound,
         Self::StreamReplaced,
@@ -323,6 +406,11 @@ impl ProblemCode {
         Self::EpochBehind,
         Self::TooLarge,
         Self::UnsupportedMediaType,
+        Self::Unauthorized,
+        Self::Forbidden,
+        Self::HttpsRequired,
+        Self::RateLimited,
+        Self::QuotaExceeded,
         Self::NotFound,
         Self::MethodNotAllowed,
         Self::Internal,
@@ -339,6 +427,11 @@ impl ProblemCode {
             Self::EpochBehind => "epoch_behind",
             Self::TooLarge => "too_large",
             Self::UnsupportedMediaType => "unsupported_media_type",
+            Self::Unauthorized => "unauthorized",
+            Self::Forbidden => "forbidden",
+            Self::HttpsRequired => "https_required",
+            Self::RateLimited => "rate_limited",
+            Self::QuotaExceeded => "quota_exceeded",
             Self::NotFound => "not_found",
             Self::MethodNotAllowed => "method_not_allowed",
             Self::Internal => "internal",
@@ -358,6 +451,11 @@ impl ProblemCode {
             "epoch_behind" => Self::EpochBehind,
             "too_large" => Self::TooLarge,
             "unsupported_media_type" => Self::UnsupportedMediaType,
+            "unauthorized" => Self::Unauthorized,
+            "forbidden" => Self::Forbidden,
+            "https_required" => Self::HttpsRequired,
+            "rate_limited" => Self::RateLimited,
+            "quota_exceeded" => Self::QuotaExceeded,
             "not_found" => Self::NotFound,
             "method_not_allowed" => Self::MethodNotAllowed,
             "internal" => Self::Internal,
@@ -571,14 +669,15 @@ mod tests {
     #[test]
     fn a_problem_keeps_codes_it_does_not_know() {
         let problem = Problem {
-            code: ProblemCode::Other("rate_limited".into()),
-            message: "slow down".into(),
+            code: ProblemCode::Other("a_newer_reason".into()),
+            message: "not today".into(),
             head: None,
             epoch: None,
             limit: None,
+            retry: None,
         };
         let decoded = decode::<Problem>(&encode(&problem)).unwrap();
-        assert_eq!(decoded.code.as_str(), "rate_limited");
+        assert_eq!(decoded.code.as_str(), "a_newer_reason");
         assert_eq!(ProblemCode::from_wire("cursor_ahead"), ProblemCode::CursorAhead);
     }
 
@@ -603,6 +702,11 @@ mod tests {
                 | ProblemCode::EpochBehind
                 | ProblemCode::TooLarge
                 | ProblemCode::UnsupportedMediaType
+                | ProblemCode::Unauthorized
+                | ProblemCode::Forbidden
+                | ProblemCode::HttpsRequired
+                | ProblemCode::RateLimited
+                | ProblemCode::QuotaExceeded
                 | ProblemCode::NotFound
                 | ProblemCode::MethodNotAllowed
                 | ProblemCode::Internal => {}
@@ -611,6 +715,14 @@ mod tests {
         }
         let distinct: std::collections::HashSet<&str> = ProblemCode::KNOWN.iter().map(ProblemCode::as_str).collect();
         assert_eq!(distinct.len(), ProblemCode::KNOWN.len(), "two codes share a spelling");
+    }
+
+    #[test]
+    fn limits_round_trip_with_every_field_on_the_wire() {
+        let limits = Limits { write: false, used: 12, ..Limits::DEFAULT };
+        let bytes = encode(&limits);
+        assert_eq!(bytes[0], 0xab, "a map of eleven keys");
+        assert_eq!(decode::<Limits>(&bytes).unwrap(), limits);
     }
 
     #[test]

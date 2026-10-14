@@ -2,6 +2,7 @@
 //! relay.
 //!
 //! ```console
+//! $ export MINI_VAULT_KEY="$(efema-server keys add notes write)"
 //! $ export MINI_VAULT_PASSPHRASE='a long passphrase, not this one'
 //! $ mini-vault --relay http://127.0.0.1:2451 --folder ./notes --state ./notes-state sync
 //! $ mini-vault --relay http://127.0.0.1:2451 --folder ./notes --state ./notes-state doctor
@@ -13,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use efema::{Client, Epoch, Relay, Secret, State, StreamName};
+use efema::{AccessKey, Client, Epoch, Relay, Secret, State, StreamName};
 use mini_vault::{Summary, Vault};
 
 /// Keep a folder in sync with other devices through an efema relay.
@@ -23,6 +24,10 @@ struct Cli {
     /// The relay.
     #[arg(long, env = "MINI_VAULT_RELAY")]
     relay: String,
+    /// The access key the relay's operator handed out for this folder's
+    /// space.
+    #[arg(long, env = "MINI_VAULT_KEY", hide_env_values = true)]
+    key: AccessKey,
     /// The stream the folder syncs through.
     #[arg(long, default_value = "vault")]
     stream: StreamName,
@@ -72,7 +77,7 @@ async fn run(cli: Cli) -> Result<()> {
         bail!("the state directory must be outside the folder it syncs");
     }
     let state = State::open(cli.state.join("sync.sqlite3"))?;
-    let relay = Relay::new(&cli.relay)?;
+    let relay = Relay::new(&cli.relay, cli.key)?;
     let client = Client::open(relay, &state, cli.stream, EPOCH, Secret::Passphrase(cli.passphrase.as_bytes())).await?;
 
     match cli.command {

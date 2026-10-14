@@ -68,21 +68,26 @@ async fn nothing_the_relay_keeps_or_logs_is_plaintext() {
     let hex_key: String = key.iter().map(|b| format!("{b:02x}")).collect();
     let devices = [laptop.state.device(), phone.state.device()];
     let url = relay.url.clone();
+    let relay_key = relay.key.clone();
     let dir = relay.stop().await;
 
     // With the relay gone, a push waits on the device - sealed there too.
-    let offline = efema::Relay::new(&url).unwrap();
+    let offline = efema::Relay::new(&url, relay_key.clone()).unwrap();
     let waiting = laptop.try_open(offline, "notes", 1, Secret::Passphrase(NEW_PASSPHRASE)).await.unwrap();
     let (kept, _) = unsent(waiting.with_compression(Compression::Off).push([marker]).await);
     assert_eq!(kept, 1);
 
     let stored = relay_bytes(dir.path());
     assert!(stored.len() > long.len(), "the relay's files were not found");
-    let secrets: [(&str, &[u8]); 4] = [
+    // The access key travels with every request; the relay keeps its digest.
+    let access = relay_key.expose();
+    let access = access.trim_start_matches(efema::ACCESS_KEY_PREFIX);
+    let secrets: [(&str, &[u8]); 5] = [
         ("an item", marker),
         ("the passphrase", PASSPHRASE),
         ("the new passphrase", NEW_PASSPHRASE),
         ("the key", key.as_slice()),
+        ("the access key", access.as_bytes()),
     ];
     for (what, secret) in secrets {
         assert!(!contains(&stored, secret), "the relay stored {what} in the clear");
@@ -173,12 +178,14 @@ async fn a_device_that_joined_opens_without_the_network() {
     let device = Device::new();
     device.open(relay.transport(), "notes", 1).await;
     let gone = relay.url.clone();
+    let relay_key = relay.key.clone();
     relay.stop().await;
 
     let device = device.restart();
-    let offline = efema::Relay::new(&gone).unwrap();
+    let offline = efema::Relay::new(&gone, relay_key.clone()).unwrap();
     let client = device.try_open(offline, "notes", 1, Secret::Passphrase(PASSPHRASE)).await.unwrap();
-    let wrong = device.try_open(efema::Relay::new(&gone).unwrap(), "notes", 1, Secret::Passphrase(b"nope")).await;
+    let wrong =
+        device.try_open(efema::Relay::new(&gone, relay_key).unwrap(), "notes", 1, Secret::Passphrase(b"nope")).await;
     assert!(matches!(wrong, Err(Error::WrongPassphrase { .. })), "{wrong:?}");
 
     // Kept on the device, and not sent: the relay cannot be reached.
@@ -263,7 +270,7 @@ async fn a_push_is_cut_to_what_one_request_may_carry() {
     let relay = TestRelay::start().await;
     let device = Device::new();
     let mut between = Between::new(relay.transport());
-    between.limits = Limits { max_body: 1000, ..Limits::V1 };
+    between.limits = Limits { body: 1000, ..Limits::DEFAULT };
     let appends = between.appends.clone();
     let client = device.open(between, "notes", 1).await;
     let opened = appends.load(Ordering::SeqCst);

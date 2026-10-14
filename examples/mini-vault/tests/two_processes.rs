@@ -12,20 +12,24 @@ const PASSPHRASE: &str = "a passphrase for tests only";
 
 struct Relay {
     url: String,
+    key: String,
     _stop: oneshot::Sender<()>,
     _dir: TempDir,
 }
 
 async fn relay() -> Relay {
     let dir = tempfile::tempdir().unwrap();
-    let relay = efema_server::Relay::open(dir.path()).unwrap();
+    let store = efema_server::store::Store::open(dir.path()).unwrap();
+    let key = store.add_key(&"vaults".parse().unwrap(), efema_server::Access::Write, "").unwrap().expose();
+    drop(store);
+    let relay = efema_server::Relay::open(dir.path(), efema_server::Config::default()).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = oneshot::channel::<()>();
     tokio::spawn(relay.serve(listener, async move {
         let _ = stopped.await;
     }));
-    Relay { url, _stop: stop, _dir: dir }
+    Relay { url, key, _stop: stop, _dir: dir }
 }
 
 struct Device {
@@ -49,6 +53,7 @@ impl Device {
             .arg(self.root.path().join("state"))
             .args(args)
             .env("MINI_VAULT_PASSPHRASE", PASSPHRASE)
+            .env("MINI_VAULT_KEY", &relay.key)
             .output()
             .unwrap();
         let stdout = String::from_utf8(output.stdout).unwrap();

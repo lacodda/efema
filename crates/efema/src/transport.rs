@@ -9,8 +9,8 @@
 use std::future::Future;
 use std::time::Duration;
 
-use efema_proto::wire::{Batch, Heads, Page, Problem, ProblemCode, Watch, Written};
-use efema_proto::{Cursor, StreamName, limits};
+use efema_proto::wire::{Batch, Heads, Limits, Page, Problem, ProblemCode, Watch, Written};
+use efema_proto::{Cursor, StreamName};
 
 /// A way to reach streams.
 ///
@@ -22,7 +22,11 @@ pub trait Transport: Send + Sync + 'static {
     /// [`Client::doctor`](crate::Client::doctor).
     fn describe(&self) -> String;
 
-    /// What one request may carry and one page may hold.
+    /// What the relay holds this device's access key to: whether it writes,
+    /// what one request may carry and one page may hold, and how much its
+    /// space may keep. Asked of the relay; a client keeps the answer in the
+    /// device's state and asks again when the relay refuses something as
+    /// too large.
     fn limits(&self) -> impl Future<Output = Result<Limits, TransportError>> + Send;
 
     /// Appends a batch to a stream: all of its entries on consecutive
@@ -45,28 +49,6 @@ pub trait Transport: Send + Sync + 'static {
     fn wait(&self, watches: &[Watch], timeout: Duration) -> impl Future<Output = Result<Heads, TransportError>> + Send;
 }
 
-/// What one request may carry and one page may hold.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Limits {
-    /// The largest request body, in bytes. A push is cut into batches that
-    /// each fit.
-    pub max_body: usize,
-    /// The most entries one read asks for.
-    pub page_entries: usize,
-    /// The longest one wait may last.
-    pub wait_max: Duration,
-}
-
-impl Limits {
-    /// The limits of protocol version 1, which every relay of this release
-    /// enforces.
-    pub const V1: Self = Self {
-        max_body: limits::MAX_BODY_BYTES,
-        page_entries: limits::PAGE_ENTRIES_DEFAULT,
-        wait_max: limits::WAIT_MAX,
-    };
-}
-
 /// Why a transport could not do what it was asked.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -76,8 +58,9 @@ pub enum TransportError {
     Refused {
         /// Where the refusal came from.
         at: String,
-        /// The relay's reason.
-        problem: Problem,
+        /// The relay's reason - boxed, so an error is small to pass around
+        /// when nothing went wrong.
+        problem: Box<Problem>,
     },
     /// The relay could not be reached, or the connection broke.
     #[error("cannot reach {at}")]

@@ -1,12 +1,14 @@
 //! One report on a device's sync, the same in every app.
 //!
 //! An app shows it under its own command - `scheda doctor`, `kilna doctor` -
-//! and none of them writes its own: what the relay says, how far behind the
-//! device is, what waits on it to be sent, how old its key is.
+//! and none of them writes its own: what the relay says, what the access key
+//! may do and how full its space is, how far behind the device is, what waits
+//! on it to be sent, how old its key is.
 
 use std::fmt;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use efema_proto::wire::Limits;
 use efema_proto::{Cursor, Epoch, StreamId, StreamName};
 use lacodda_seal::{KdfParams, KeyId};
 
@@ -18,6 +20,10 @@ use crate::{DeviceId, Error};
 /// How long items may wait on a device before the wait is a problem: a day
 /// without the relay taking them is more than a network that comes and goes.
 pub const QUEUE_STALE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How full a space may get before it is a problem: past nine tenths, the
+/// next large push may be the one the relay refuses.
+pub const SPACE_FULL: f64 = 0.9;
 
 /// A device's sync, as [`Client::doctor`] finds it.
 #[derive(Debug)]
@@ -40,6 +46,9 @@ pub struct Report {
     pub key: KeyReport,
     /// What the relay said, or why it said nothing.
     pub relay: Result<RelayReport, String>,
+    /// What the relay holds the access key to - whether it writes, how full
+    /// its space is - or why that could not be learnt.
+    pub access: Result<Limits, String>,
 }
 
 /// The stream's key, as far as the device can tell without the passphrase.
@@ -99,6 +108,25 @@ impl Report {
             }
             Ok(_) => {}
         }
+        match (&self.access, &self.queue) {
+            (Ok(access), Ok(queue)) if !access.write && !queue.is_empty() => problems.push(format!(
+                "{} {} to be sent, and the access key only reads: the relay will not take {}",
+                queue.items,
+                plural(queue.items as u64, "item waits", "items wait"),
+                if queue.items == 1 { "it" } else { "them" }
+            )),
+            _ => {}
+        }
+        if let Ok(access) = &self.access
+            && access.quota > 0
+            && access.used as f64 >= access.quota as f64 * SPACE_FULL
+        {
+            problems.push(format!(
+                "the space holds {} of the {} it may: once it is full, the relay takes nothing more until its operator gives it room",
+                size(access.used),
+                size(access.quota)
+            ));
+        }
         match &self.relay {
             Err(e) => problems.push(e.clone()),
             Ok(relay) if relay.epoch > self.epoch => problems.push(format!(
@@ -154,6 +182,15 @@ impl fmt::Display for Report {
             ),
             Err(_) => "unknown".to_string(),
         };
+        let access = match &self.access {
+            Ok(access) => format!(
+                "{} - {} of {} in the space",
+                if access.write { "reads and writes" } else { "reads only" },
+                size(access.used),
+                size(access.quota)
+            ),
+            Err(_) => "unknown".to_string(),
+        };
         let mut key =
             format!("{} - locked {}, {}", self.key.id, when(self.key.locked_at, SystemTime::now()), self.key.params);
         match self.key.changes {
@@ -163,6 +200,7 @@ impl fmt::Display for Report {
         }
 
         writeln!(f, "relay    {relay}")?;
+        writeln!(f, "access   {access}")?;
         writeln!(f, "stream   {stream}")?;
         writeln!(f, "cursor   {cursor}")?;
         writeln!(f, "queue    {queue}")?;
@@ -178,8 +216,9 @@ impl fmt::Display for Report {
 
 impl<T: Transport> Client<T> {
     /// Looks at this device's sync: asks the relay for the stream from the
-    /// device's cursor, and reports what it found next to what the device
-    /// knows. Never fails - what cannot be found out is in the report.
+    /// device's cursor and for its limits - keeping them, as a send would -
+    /// and reports what it found next to what the device knows. Never fails -
+    /// what cannot be found out is in the report.
     pub async fn doctor(&self) -> Report {
         let cursor = self.cursor().await.map_err(|e| e.to_string());
         let queue = self.queue().await.map_err(|e| e.to_string());
@@ -191,6 +230,7 @@ impl<T: Transport> Client<T> {
             },
             Err(e) => Err(e.clone()),
         };
+        let access = self.refresh_limits().await.map_err(|e| e.to_string());
         let lock = self.locked_key();
         let changes = self.passphrase_changes();
         Report {
@@ -203,6 +243,7 @@ impl<T: Transport> Client<T> {
             queue,
             key: KeyReport { id: lock.key_id(), params: lock.params(), locked_at: lock.locked_at(), changes },
             relay,
+            access,
         }
     }
 }
@@ -224,12 +265,13 @@ fn plural<'a>(count: u64, one: &'a str, many: &'a str) -> &'a str {
     if count == 1 { one } else { many }
 }
 
-/// A size for people: bytes, then KiB and MiB with one decimal.
+/// A size for people: bytes, then KiB, MiB and GiB with one decimal.
 fn size(bytes: u64) -> String {
     match bytes {
         0..1024 => format!("{bytes} {}", plural(bytes, "byte", "bytes")),
         1024..1_048_576 => format!("{:.1} KiB", bytes as f64 / 1024.0),
-        _ => format!("{:.1} MiB", bytes as f64 / 1_048_576.0),
+        1_048_576..1_073_741_824 => format!("{:.1} MiB", bytes as f64 / 1_048_576.0),
+        _ => format!("{:.1} GiB", bytes as f64 / 1_073_741_824.0),
     }
 }
 
@@ -281,6 +323,7 @@ mod tests {
                 changes: 0,
             },
             relay: Ok(RelayReport { latency: Duration::from_millis(3), head: 0, epoch: Epoch(1) }),
+            access: Ok(Limits::DEFAULT),
         }
     }
 
@@ -310,12 +353,39 @@ mod tests {
     }
 
     #[test]
+    fn the_report_says_what_the_key_may_do_and_when_it_cannot_send() {
+        let now = SystemTime::now();
+        let shown = report(Ok(Queue::default())).to_string();
+        assert!(shown.contains("\naccess   reads and writes - 0 bytes of 8.0 GiB in the space\n"), "{shown}");
+
+        let waiting = Queue { batches: 1, items: 2, bytes: 100, oldest: Some(now) };
+        let mut reader = report(Ok(waiting));
+        reader.access = Ok(Limits { write: false, ..Limits::DEFAULT });
+        assert!(reader.to_string().contains("\naccess   reads only - "), "{reader}");
+        assert_eq!(
+            reader.problems_at(now),
+            ["2 items wait to be sent, and the access key only reads: the relay will not take them"]
+        );
+        reader.queue = Ok(Queue::default());
+        assert!(reader.problems_at(now).is_empty(), "a key that reads and has nothing to send is no problem");
+
+        let mut full = report(Ok(Queue::default()));
+        full.access = Ok(Limits { used: 900, quota: 1000, ..Limits::DEFAULT });
+        let problems = full.problems_at(now);
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].starts_with("the space holds 900 bytes of the 1000 bytes it may"), "{problems:?}");
+        full.access = Ok(Limits { used: 899, quota: 1000, ..Limits::DEFAULT });
+        assert!(full.problems_at(now).is_empty());
+    }
+
+    #[test]
     fn sizes_are_for_people() {
         assert_eq!(size(0), "0 bytes");
         assert_eq!(size(1), "1 byte");
         assert_eq!(size(1023), "1023 bytes");
         assert_eq!(size(1024), "1.0 KiB");
         assert_eq!(size(5 * 1_048_576 / 2), "2.5 MiB");
+        assert_eq!(size(8 << 30), "8.0 GiB");
     }
 
     #[test]

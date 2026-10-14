@@ -4,7 +4,7 @@ description: List the streams a relay keeps, or the entries of one - positions, 
 ---
 
 ```console
-$ efema-server streams [NAME] [--data <DIR>]
+$ efema-server streams [SPACE/NAME] [--data <DIR>]
 ```
 
 Reads the relay's database and prints what it keeps. Safe while the relay is
@@ -15,14 +15,15 @@ directory with no relay in it, it says so instead of creating one.
 
 ```console
 $ efema-server streams --data ./relay
-STREAM  ID        EPOCH  ENTRIES       SIZE  UPDATED (UTC)
-notes   11c3cd7e  1            3    1.7 KiB  2026-10-08 18:36
-photos  6964d409  2            3  144.0 KiB  2026-10-08 18:36
+STREAM        ID        EPOCH  ENTRIES       SIZE  UPDATED (UTC)
+home/notes    11c3cd7e  1            3    1.7 KiB  2026-10-08 18:36
+home/photos   6964d409  2            3  144.0 KiB  2026-10-08 18:36
+work/notes    a1f03e52  1            1      640 B  2026-10-08 18:40
 ```
 
 | Column | Meaning |
 | --- | --- |
-| `STREAM` | the stream's name |
+| `STREAM` | the stream's space and name, `<space>/<name>`: two spaces may each have a stream of the same name |
 | `ID` | the first eight hex digits of its identity, which changes only if the stream is started over |
 | `EPOCH` | the stream's current epoch |
 | `ENTRIES` | its last position - the number of entries, since positions start at 1 and have no gaps |
@@ -32,7 +33,7 @@ photos  6964d409  2            3  144.0 KiB  2026-10-08 18:36
 ## One stream
 
 ```console
-$ efema-server streams notes --data ./relay
+$ efema-server streams home/notes --data ./relay
 SEQ  EPOCH   SIZE  HASH
   1  1      640 B  0d72a730
   2  1      560 B  19cdc65a
@@ -49,11 +50,12 @@ entry is opaque to the relay, and so to its listing.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `NAME` | none | show this stream's entries instead of the list of streams |
+| `SPACE/NAME` | none | show this stream's entries instead of the list of streams |
 | `--data <DIR>` | the local data directory | the relay to look at - see [Commands](/efema/reference/commands/#the-data-directory) |
 
 ## Related
 
 - [`serve`](/efema/reference/serve/) - the relay this looks at.
+- [`keys`](/efema/reference/keys/) - the keys that open its spaces.
 - [Streams and cursors](/efema/concepts/streams-and-cursors/) - what positions,
   epochs and links are.

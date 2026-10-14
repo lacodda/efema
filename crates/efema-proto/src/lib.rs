@@ -15,7 +15,10 @@
 //!
 //! # The pieces
 //!
-//! - [`StreamName`] - the name a stream is addressed by, in the URL.
+//! - [`AccessKey`] - what a device shows the relay to reach the streams of
+//!   one *space*: to read them, or to read and write them.
+//! - [`StreamName`] - the name a stream is addressed by, in the URL, within
+//!   the space the access key opens.
 //! - [`StreamId`] - which *incarnation* of that name: a fresh random value
 //!   when the stream is created, so a cursor from a stream that was wiped and
 //!   started again is recognised as foreign instead of silently reused.
@@ -25,6 +28,7 @@
 //!   cursor names not just a position but the history up to it.
 //! - [`Cursor`] - where a reader stands: stream, position and the hash there.
 //! - [`wire`] - the request and response bodies, encoded as CBOR.
+//! - [`limits`] - the protocol's ceilings, and a relay's defaults below them.
 //!
 //! ```
 //! use efema_proto::{chain, Epoch, StreamId};
@@ -38,6 +42,7 @@
 //! assert_ne!(first, chain::link(&start, 1, Epoch(2), b"sealed bytes"));
 //! ```
 
+mod access;
 pub mod chain;
 mod cursor;
 mod hex;
@@ -46,6 +51,7 @@ pub mod limits;
 mod name;
 pub mod wire;
 
+pub use access::{ACCESS_KEY_PREFIX, AccessKey, ParseAccessKeyError, access_id};
 pub use cursor::{Cursor, ParseCursorError};
 pub use ids::{Epoch, Hash, ParseIdError, StreamId};
 pub use name::{InvalidName, MAX_NAME_LEN, StreamName};

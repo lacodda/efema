@@ -19,11 +19,11 @@ hero:
           <span class="ef-install__os">install &amp; run</span>
         </div>
         <pre class="ef-install__body"><span class="ef-install__prompt">$</span> cargo install efema-server
-      <span class="ef-install__prompt">$</span> efema-server serve
-      <span class="ef-install__comment"># listening on 127.0.0.1:2451</span>
+      <span class="ef-install__prompt">$</span> efema-server keys add home write
+      <span class="ef-install__comment"># efema_2a61… - a device's key to space home</span>
 
-      <span class="ef-install__prompt">$</span> curl 127.0.0.1:2451/health
-      ok</pre>
+      <span class="ef-install__prompt">$</span> efema-server serve
+      <span class="ef-install__comment"># listening on 127.0.0.1:2451</span></pre>
       </div>
   actions:
     - text: Get started
@@ -44,8 +44,9 @@ A local-first app keeps its data on the device, and works without a network.
 The moment it runs on a second device, the two need somewhere to leave their
 changes for each other. efema is that place, and nothing more.
 
-A device appends a **batch** of changes to a named **stream**. The relay gives
-each entry the next **position** and links it into the stream's hash chain.
+A device appends a **batch** of changes to a named **stream**, in the
+**space** its access key opens. The relay gives each entry the next
+**position** and links it into the stream's hash chain.
 Every other device reads what came after its **cursor** - or waits until there
 is something to read. Batches arrive whole and in one order for everyone,
 and a cursor that no longer matches the relay's history is refused, not
@@ -60,17 +61,15 @@ silently read past.
   their batch kept, in order. Deciding what the result is belongs to the app,
   which knows what its data means - the relay does not, by design.
 - **It does not terminate TLS.** Put it behind the reverse proxy that already
-  serves your other things.
+  serves your other things - plain HTTP from another machine it refuses.
 
 ## Status
 
-0.4.0 is the relay and the Rust client library,
-[`efema`](https://docs.rs/efema): every entry compressed and sealed on the
-device with a key the relay never has, kept there until the relay has it and
-written once however often a broken network sends it again, a passphrase that
-changes without sealing anything again, cursors that survive restarts, epochs
-on both sides - and the promises that the relay keeps nothing readable and
-that a torn connection loses and doubles nothing shown by tests, not only
-stated. The relay has no access control of its own yet - it arrives in 0.5.0 -
-so run it on loopback or a network you trust, behind a proxy for TLS.
+0.5.0 is the relay and the Rust client library,
+[`efema`](https://docs.rs/efema), and a relay safe to leave reachable behind an
+HTTPS proxy: access keys to spaces, that read or that write; limits per key,
+announced and followed; plain HTTP from outside refused. Every entry is
+compressed and sealed on the device with a key the relay never has, kept there
+until the relay has it and written once however often a broken network sends
+it again - and each of those promises is shown by tests, not only stated.
 [Syncing an app](/efema/guides/syncing-an-app/) is where to start.

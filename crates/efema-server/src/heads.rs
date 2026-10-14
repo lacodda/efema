@@ -1,6 +1,7 @@
 //! Who is waiting for which stream, and the news that wakes them.
 //!
-//! One `watch` channel per stream that anyone has waited on or written to,
+//! One `watch` channel per stream - a name in a space - that anyone has
+//! waited on or written to,
 //! carrying the stream's identity and head. A write publishes the new head
 //! after its commit; a waiting reader holds a receiver and wakes when the value
 //! stops matching what it said it knew. The channel carries positions only -
@@ -14,9 +15,12 @@ use tokio::sync::watch;
 
 use crate::store::StreamState;
 
+/// A stream as the relay addresses it: its space, and its name there.
+pub type Address = (i64, StreamName);
+
 #[derive(Default)]
 pub struct Heads {
-    streams: Mutex<HashMap<StreamName, watch::Sender<StreamState>>>,
+    streams: Mutex<HashMap<Address, watch::Sender<StreamState>>>,
 }
 
 impl Heads {
@@ -24,7 +28,7 @@ impl Heads {
     ///
     /// Called by the writer after each commit, in commit order. The value only
     /// moves forward: a stale publication cannot pull a head back.
-    pub fn publish(&self, name: &StreamName, id: StreamId, head: u64) {
+    pub fn publish(&self, name: &Address, id: StreamId, head: u64) {
         let state = StreamState { id: Some(id), head };
         let mut streams = self.lock();
         match streams.get(name) {
@@ -53,7 +57,7 @@ impl Heads {
     /// insert, and the waiter would sleep through it.
     pub fn subscribe<E>(
         &self,
-        name: &StreamName,
+        name: &Address,
         load: impl FnOnce() -> Result<StreamState, E>,
     ) -> Result<watch::Receiver<StreamState>, E> {
         let mut streams = self.lock();
@@ -66,7 +70,7 @@ impl Heads {
         Ok(receiver)
     }
 
-    fn lock(&self) -> MutexGuard<'_, HashMap<StreamName, watch::Sender<StreamState>>> {
+    fn lock(&self) -> MutexGuard<'_, HashMap<Address, watch::Sender<StreamState>>> {
         // Nothing inside the map can be left half-updated by a panic: every
         // change is a single insert or a single send.
         self.streams.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -77,8 +81,8 @@ impl Heads {
 mod tests {
     use super::*;
 
-    fn name() -> StreamName {
-        "s".parse().unwrap()
+    fn name() -> Address {
+        (1, "s".parse().unwrap())
     }
 
     #[test]
@@ -100,5 +104,14 @@ mod tests {
         assert_eq!(*rx.borrow(), StreamState::default());
         heads.publish(&name(), StreamId::from_bytes([2; 16]), 1);
         assert!(rx.has_changed().unwrap());
+    }
+
+    #[test]
+    fn a_name_in_another_space_is_another_stream() {
+        let heads = Heads::default();
+        let other: Address = (2, "s".parse().unwrap());
+        let rx = heads.subscribe::<()>(&other, || Ok(StreamState::default())).unwrap();
+        heads.publish(&name(), StreamId::from_bytes([2; 16]), 1);
+        assert!(!rx.has_changed().unwrap(), "a write in one space woke a waiter in another");
     }
 }

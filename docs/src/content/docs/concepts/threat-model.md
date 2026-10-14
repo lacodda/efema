@@ -1,6 +1,6 @@
 ---
 title: Threat model
-description: What an efema relay can see and do, what it cannot, which of that is shown by tests, and what this version does not protect yet.
+description: What an efema relay can see and do, who can reach it, what it cannot, which of that is shown by tests, and what this version does not protect yet.
 ---
 
 A relay sits between your devices and holds everything they say to each other.
@@ -13,7 +13,8 @@ record before the implementation. It now says what the code does - and
 
 Whoever runs the relay - you, a friend, a hosting company - can see:
 
-- **stream names**, which travel in the URL;
+- **stream names**, which travel in the URL, and the **spaces** they are in;
+- **which access key** made each request, and when each key was last used;
 - for every entry: its **position**, **size**, **epoch** and **link**;
 - **when** each batch was written and each read and wait happened;
 - the **network address** of every device that talks to it;
@@ -23,6 +24,34 @@ Whoever runs the relay - you, a friend, a hosting company - can see:
 
 Pick stream names accordingly. `notes` says little; `bank-passwords` says what
 it says to anyone who can read the relay's database or its logs.
+
+## Who can reach it
+
+Nobody without an access key. Every request under `/v1` carries one, and a
+key opens one **space** of the relay: its streams, and no others. The
+operator hands keys out and revokes them; a revoked key opens nothing from its
+next request on ([`keys`](/efema/reference/keys/)).
+
+- **A key that reads** reads the space's streams and waits on them. It cannot
+  append, so it cannot fill a stream, create one, or raise a stream's epoch to
+  lock the other devices out.
+- **A key that writes** does all of that, within the space.
+- **Neither reaches another space.** A name there is another stream; a cursor
+  or a stream identity from another space finds nothing.
+
+The relay keeps a digest of each key, not the key, and logs neither. A key is
+a bearer secret: whoever holds it is, to the relay, the device it was handed
+out to.
+
+**Only through HTTPS.** The relay has no TLS of its own, and answers only its
+own machine and requests a trusted reverse proxy took over HTTPS. Plain HTTP
+from another machine is refused before the key is looked at - and the client
+library refuses to send a key over plain HTTP to anything but its own machine.
+
+**Within limits.** Each key is held to a largest request and entry, a number of
+requests a minute, and a quota of data for its space - set by the operator,
+announced to the device. A stranger with a stolen key that writes can fill one
+space to its quota, not the relay's disk.
 
 ## What it does not see
 
@@ -59,16 +88,20 @@ new stream.
 
 ## What this version does not protect yet
 
-- **No access control.** Anyone who can reach the port can read and write every
-  stream. They read ciphertext, and what they write does not open on your
-  devices - but they can fill a stream with entries your devices refuse, or
-  start a stream under a name you meant to use. Access keys - separate ones for
-  reading and writing - arrive in 0.5.0.
-- **No TLS.** The relay speaks plain HTTP. It listens on loopback by default;
-  anything beyond this machine goes through a reverse proxy that terminates TLS
-  ([guide](/efema/guides/behind-a-reverse-proxy/)). The relay will not grow TLS
-  of its own: the proxy in front of it already does that well. The client
-  speaks HTTPS, and trusts what the platform trusts.
+- **A leaked access key works until it is revoked.** Keys are not bound to a
+  device or an address. A key that reads, in other hands, downloads the
+  stream's ciphertext and its key locks - and with them, the offline guessing
+  of the passphrase below. Revoke a key that leaked; it does not undo what was
+  read with it.
+- **What a revoked key wrote stays.** The stream only grows. Entries a stolen
+  key that writes appended are refused by your devices - they do not open -
+  but they are in the stream.
+- **One proxy setup the relay cannot tell apart.** A reverse proxy on the
+  relay's machine that forwards without any forwarding header looks exactly
+  like a program on that machine. Caddy says how each request came; nginx has
+  to be told to ([guide](/efema/guides/behind-a-reverse-proxy/)).
+- **Floods without a key** are refused cheaply, not limited: the rate is per
+  key. Holding back a flood from the network is the proxy's job.
 - **Sizes and times.** Sealing hides what an entry says, not how long it is or
   when it was written. Items are compressed before they are sealed, so a
   length also says how much of an item repeats. Where one item mixes a secret
@@ -80,8 +113,9 @@ new stream.
   lock - reads the whole stream, past entries included. A changed passphrase
   re-locks the key; it does not replace it.
 
-Run this version on loopback, or on a network where you would not mind
-everyone in it seeing the names, sizes and times of your streams.
+Behind a reverse proxy that terminates TLS, the relay can be left reachable:
+what a stranger without a key gets is a refusal. The operator still sees the
+names, sizes and times of every stream - pick an operator, or be one.
 
 ## What a dishonest relay can do
 
@@ -110,7 +144,16 @@ withhold the stream, not a way into it.
 
 ## What the relay protects against
 
-Accidents, mostly - the kind that happen to honest operators:
+Strangers on the network:
+
+- **A request without a key, or with one revoked**: refused, under `/v1`, on
+  every path.
+- **Plain HTTP from another machine**: refused before anything else, whatever
+  it carries.
+- **A key used more than the operator allows**: refused with when to come
+  back; a space past its quota takes nothing more.
+
+And accidents, mostly - the kind that happen to honest operators:
 
 - **A restore from an old backup**, or a disk that lost recent writes: cursors
   past the relay's head are refused with `cursor_ahead`, and cursors into a
@@ -140,7 +183,15 @@ a test that stays green with the property gone proves nothing.
 | Promise | Shown by |
 | --- | --- |
 | The relay's database, its write-ahead log and everything logged in the process at every level hold no item, passphrase, key or device identity in the clear - after every way a client writes: a new stream, pushes compressed and not, a changed passphrase, a second device joining and writing. Compression is off for the marker, so what hides it has to be the seal. A device's own state holds none of them either - with an item waiting in it to be sent. | `nothing_the_relay_keeps_or_logs_is_plaintext` ([crates/efema/tests/client.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/client.rs)) |
-| The relay, run as an operator runs it, logs no entry's bytes - as text, in hex or as numbers - at its most verbose level, refusals and repeats included. | `the_relay_never_logs_what_it_keeps` ([crates/efema-server/tests/binary.rs](https://github.com/lacodda/efema/blob/main/crates/efema-server/tests/binary.rs)) |
+| The relay, run as an operator runs it, logs no entry's bytes - as text, in hex or as numbers - at its most verbose level, refusals and repeats included; nor an access key, known or not. | `the_relay_never_logs_what_it_keeps` ([crates/efema-server/tests/binary.rs](https://github.com/lacodda/efema/blob/main/crates/efema-server/tests/binary.rs)) |
+| The relay's database holds no access key - not its text, not its bytes - only a digest of it. | `the_database_keeps_no_key` ([crates/efema-server/src/store.rs](https://github.com/lacodda/efema/blob/main/crates/efema-server/src/store.rs)) |
+| Without a key the relay answers nothing under `/v1` - no key, a wrong one, a malformed header - and a revoked key opens nothing from its next request on, revoked by another process while the relay runs. | `without_a_key_the_relay_answers_nothing_under_v1`, `a_revoked_key_opens_nothing_from_its_next_request` ([crates/efema-server/tests/access.rs](https://github.com/lacodda/efema/blob/main/crates/efema-server/tests/access.rs)), `keys_are_handed_out_listed_and_revoked_while_the_relay_runs` ([crates/efema-server/tests/binary.rs](https://github.com/lacodda/efema/blob/main/crates/efema-server/tests/binary.rs)) |
+| A key that reads writes nothing - no entry, no stream, no epoch - and a device with one keeps nothing to send. | `a_key_that_reads_does_not_write` ([crates/efema-server/tests/access.rs](https://github.com/lacodda/efema/blob/main/crates/efema-server/tests/access.rs)), `a_device_with_a_key_that_reads_pulls_and_keeps_nothing_to_send`, `a_key_that_reads_cannot_create_a_stream` ([crates/efema/tests/access.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/access.rs)) |
+| A space is closed to the keys of another: not its streams, not its cursors, not its waits. | `a_space_is_closed_to_the_keys_of_another` ([crates/efema-server/tests/access.rs](https://github.com/lacodda/efema/blob/main/crates/efema-server/tests/access.rs)), `a_stream_of_another_space_is_another_stream` ([crates/efema/tests/access.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/access.rs)) |
+| Plain HTTP from another machine is refused - the built relay on every interface, called at the machine's network address - and so is a proxy that let plain HTTP through or did not say. | `plain_http_from_another_machine_is_refused` ([crates/efema-server/tests/binary.rs](https://github.com/lacodda/efema/blob/main/crates/efema-server/tests/binary.rs)), `plain_http_from_outside_the_door_is_refused_before_anything_else`, `a_relay_answers_only_peers_it_trusts` ([crates/efema-server/tests/access.rs](https://github.com/lacodda/efema/blob/main/crates/efema-server/tests/access.rs)) |
+| Each limit holds - request, entry, quota of a space, requests a minute - and says which it was. | `a_batch_over_the_operators_limits_is_refused_with_the_limit`, `a_full_space_refuses_new_batches_and_no_other_space_feels_it`, `a_key_that_asks_too_often_is_told_when_to_ask_again` ([crates/efema-server/tests/access.rs](https://github.com/lacodda/efema/blob/main/crates/efema-server/tests/access.rs)) |
+| A batch the relay has is answered whatever the limits are now, and a queue cut for limits since lowered is cut again and lands once, in order. | `a_batch_written_before_the_limits_came_down_is_still_answered` ([crates/efema-server/tests/access.rs](https://github.com/lacodda/efema/blob/main/crates/efema-server/tests/access.rs)), `a_queue_cut_to_limits_since_lowered_is_cut_again_and_lands_once` ([crates/efema/tests/access.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/access.rs)) |
+| The metrics hold counts and times, no stream name and no entry, and answer only the relay's own machine. | `metrics_count_without_contents_and_only_on_this_machine` ([crates/efema-server/tests/access.rs](https://github.com/lacodda/efema/blob/main/crates/efema-server/tests/access.rs)) |
 | An altered entry is refused, whether the relay leaves the chain as it was or computes it anew. | `a_relay_cannot_alter_an_entry_unnoticed` ([crates/efema/tests/client.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/client.rs)) |
 | An entry no client wrote is refused, not skipped. | `an_entry_no_client_wrote_is_refused_not_skipped` ([crates/efema/tests/client.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/client.rs)) |
 | A relabelled epoch does not open. | `an_entry_opens_in_its_epoch_only` ([crates/efema/src/envelope.rs](https://github.com/lacodda/efema/blob/main/crates/efema/src/envelope.rs)) |

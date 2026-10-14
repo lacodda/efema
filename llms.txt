@@ -2,9 +2,11 @@
 
 > A sync relay for local-first apps: it keeps changes in order and cannot read them
 
-Devices append batches of sealed entries to named streams; the relay gives them
-positions, links them into a hash chain and hands every device what came after
-its cursor. It never decodes, merges or judges an entry. Five crates: the wire
+Devices append batches of sealed entries to named streams, in the space their
+access key opens; the relay gives them positions, links them into a hash chain
+and hands every device what came after its cursor. It answers only its own
+machine and HTTPS through a reverse proxy, holds each key to limits it
+announces, and never decodes, merges or judges an entry. Five crates: the wire
 format (`efema-proto`), the relay (`efema-server`), the client library that
 compresses and seals every entry on the device and keeps it there until the
 relay has it (`efema`), the sealing itself (`lacodda-seal`) and the proxy that

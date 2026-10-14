@@ -11,6 +11,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         cli::Command::Serve(args) => commands::serve::run(args),
         cli::Command::Streams(args) => commands::streams::run(args),
+        cli::Command::Keys(args) => commands::keys::run(args),
     };
 
     match result {

@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use efema_proto::wire::ProblemCode;
 use efema_proto::{Epoch, StreamName};
 use lacodda_seal::KeyId;
 
@@ -13,7 +14,8 @@ use crate::transport::TransportError;
 /// ([`Error::Transport`], [`Error::Unsent`]), update itself ([`Error::EpochBehind`],
 /// [`Error::NewerEpoch`], [`Error::NewerEntryFormat`], [`Error::NewerCodec`]),
 /// ask the person ([`Error::WrongPassphrase`], [`Error::KeyMismatch`],
-/// [`Error::PassphraseRace`]), or recover a stream
+/// [`Error::PassphraseRace`]) or the relay's operator ([`Error::Unauthorized`],
+/// [`Error::ReadOnly`], [`Error::QuotaExceeded`]), or recover a stream
 /// the relay no longer has as this device knew it ([`Error::StreamGone`],
 /// [`Error::StreamReplaced`], [`Error::CursorAhead`],
 /// [`Error::CursorDiverged`]).
@@ -22,9 +24,23 @@ use crate::transport::TransportError;
 pub enum Error {
     /// The relay could not be reached, refused for a reason not listed below,
     /// or answered something that is not the protocol. Usually worth trying
-    /// again later.
+    /// again later - after the time a `rate_limited` refusal names.
     #[error(transparent)]
-    Transport(#[from] TransportError),
+    Transport(TransportError),
+
+    /// The relay does not take the access key: it was revoked, or never
+    /// handed out there. The person needs a key from the relay's operator.
+    #[error("{relay} does not take the access key: it was revoked, or never handed out there")]
+    Unauthorized { relay: String },
+    /// The access key reads the stream's space and does not write to it.
+    /// Nothing was kept to be sent: a device with such a key only reads.
+    #[error("the access key reads stream {stream} and does not write to it")]
+    ReadOnly { stream: StreamName },
+    /// The stream's space on the relay holds all it may: the relay takes
+    /// nothing more until its operator gives the space more room. What was
+    /// pushed waits on the device.
+    #[error("the relay's space for stream {stream} is full: it may hold {quota} bytes")]
+    QuotaExceeded { stream: StreamName, quota: u64 },
 
     /// The stream this device synced with is not on the relay any more - its
     /// data was lost or wiped. Nothing was written: a client never creates a
@@ -104,8 +120,10 @@ pub enum Error {
     #[error(transparent)]
     Seal(#[from] lacodda_seal::Error),
 
-    /// One item is larger than one request may carry.
-    #[error("an item of {size} bytes is larger than the {limit} bytes one request may carry")]
+    /// One item is larger than the relay takes. Before a push keeps it,
+    /// `size` and `limit` are the item's; for an item already waiting, which
+    /// the relay's limits came down below, they are the sealed entry's.
+    #[error("an item of {size} bytes is larger than the {limit} bytes the relay takes")]
     ItemTooLarge { size: usize, limit: usize },
     /// Sending stopped with items still waiting on this device: they are
     /// kept, sealed, and go with the next [`Client::push`](crate::Client::push)
@@ -143,4 +161,17 @@ pub enum Error {
     /// The operating system's random source failed.
     #[error("the operating system's random source failed")]
     Random,
+}
+
+impl From<TransportError> for Error {
+    /// A refusal that means the same wherever it comes from has a variant of
+    /// its own; the rest stay what the transport said.
+    fn from(e: TransportError) -> Self {
+        match &e {
+            TransportError::Refused { at, problem } if problem.code == ProblemCode::Unauthorized => {
+                Self::Unauthorized { relay: at.clone() }
+            }
+            _ => Self::Transport(e),
+        }
+    }
 }

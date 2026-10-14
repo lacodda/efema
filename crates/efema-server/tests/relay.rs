@@ -558,7 +558,7 @@ async fn a_restarted_relay_has_everything_and_honours_old_cursors() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_directory_is_served_by_one_relay_at_a_time() {
     let relay = TestRelay::start().await;
-    match efema_server::Relay::open(relay.dir.path()) {
+    match efema_server::Relay::open(relay.dir.path(), efema_server::Config::default()) {
         Err(efema_server::OpenError::Busy(_)) => {}
         Err(other) => panic!("expected Busy, got {other}"),
         Ok(_) => panic!("a second relay opened a directory that is being served"),
