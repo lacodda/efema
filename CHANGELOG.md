@@ -14,6 +14,29 @@ across or a plain statement that there is none.
 0.1.0 since efema 0.2.0, lacodda-tear 0.1.0 since efema 0.4.0); their changes
 are listed under the efema release they shipped with.
 
+## [0.5.0] - 2026-10-15
+
+### Breaking Changes
+
+- **Reach a relay only with an access key, within its limits**: every request under /v1 carries an access key, and
+the client's Relay::new takes one with the address. Relay::open takes
+a Config. The relay's commands name a stream as space/name. The
+client's Limits is the record the relay announces.
+
+### Features
+
+- Reach a relay only with an access key, within its limits
+
+### Bug Fixes
+
+- Take the entry limit down with a lowered body
+
+### Testing
+
+- Hold a key's access and the kept limits to the relay's
+- Hold plain http to this machine in a unit test
+
+
 ## [0.4.0] - 2026-10-11
 
 ### Breaking Changes
