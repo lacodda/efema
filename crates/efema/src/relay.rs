@@ -200,3 +200,41 @@ fn on_this_machine(url: &Url) -> bool {
     };
     host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key() -> AccessKey {
+        format!("efema_{}", "0".repeat(64)).parse().unwrap()
+    }
+
+    #[test]
+    fn plain_http_carries_a_key_only_to_this_machine() {
+        for url in [
+            "https://sync.example.com",
+            "https://sync.example.com/efema/",
+            "http://localhost:2451",
+            "http://LOCALHOST",
+            "http://127.0.0.1:2451",
+            "http://127.0.0.2",
+            "http://[::1]:2451",
+        ] {
+            assert!(Relay::new(url, key()).is_ok(), "{url}");
+        }
+        for url in [
+            "http://sync.example.com",
+            "http://localhost.example.com",
+            "http://127.0.0.1.example.com",
+            "http://192.0.2.1:2451",
+            "http://[2001:db8::1]:2451",
+            "http://0.0.0.0:2451",
+            "ftp://127.0.0.1",
+            "https://sync.example.com/?space=home",
+            "sync.example.com",
+        ] {
+            let refused = Relay::new(url, key()).err().unwrap_or_else(|| panic!("{url} is taken"));
+            assert!(!refused.to_string().contains("efema_"), "{refused}");
+        }
+    }
+}
