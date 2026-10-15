@@ -30,6 +30,7 @@ client's Limits is the record the relay announces.
 ### Bug Fixes
 
 - Take the entry limit down with a lowered body
+- Take rustls 0.23.46 past four advisories
 
 ### Testing
 
