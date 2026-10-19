@@ -121,6 +121,37 @@ The copy is an ordinary new file from then on, sent like any other. Every
 device that had the overlooked version makes the same copy, and the copies
 meet in the stream as one file.
 
+## How long the first sync takes
+
+The first sync of a vault is the heaviest a relay sees: every file at once,
+to an empty stream. `first-sync` times it - the whole vault up to the relay,
+then down to a second device's empty folder - and checks the two folders hold
+the same bytes:
+
+```console
+$ cargo run --release -p mini-vault --example first-sync -- --limit 30
+vault  5080 files, 101.6 MiB (made up, seed 1)
+relay  http://127.0.0.1:5612, stream first-sync-7797a70c
+up     5080 files in 6.5 s - the stream's key made in 0.5 s
+down   5080 files in 11.6 s - the key unlocked in 0.2 s
+check  both folders hold the same bytes
+limit  30 s up: within
+```
+
+The vault is made up, shaped like a working one: 5080 notes and attachments,
+half of them under 4 KB, one in a hundred over 240 KB, the largest a few MB.
+`--folder` syncs a folder of your own instead - it is only read - and
+`--relay` with `FIRST_SYNC_KEY` goes through a relay of yours rather than one
+started for the run. Each run seals with a passphrase of its own that is never
+shown, so what it leaves on a relay can be opened by no one.
+
+The way up is the library's and the relay's - reading, compressing, sealing,
+keeping and sending every file, and the relay writing it - and `--limit`
+holds it: CI runs it on Linux and Windows on every change, and fails over 30
+seconds. The way down is mostly the app's: reading the stream takes under a
+second, and writing thousands of new files is the operating system's slowest
+part of it.
+
 ## What it does not do
 
 It is an example, and stops where an example should: no file larger than one

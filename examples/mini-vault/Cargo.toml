@@ -20,7 +20,12 @@ minicbor.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 
+[[example]]
+name = "first-sync"
+path = "examples/first_sync.rs"
+
 [dev-dependencies]
 efema-server.workspace = true
+getrandom.workspace = true
 lacodda-tear.workspace = true
 tempfile.workspace = true

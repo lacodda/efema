@@ -43,6 +43,25 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  # The first sync of a vault, timed: 5080 files shaped like a working vault
+  # go up to an empty relay and down to a second device, byte for byte. A
+  # release build, because that is what an app ships; the limit is on the way
+  # up - the library and the relay - and catches a regression, not a slow
+  # runner.
+  first-sync:
+    name: first sync (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: 5080 files up and down
+        run: cargo run --release -p mini-vault --example first-sync -- --limit 30
+
   # rust-version is a promise to anyone running `cargo install`. Without a job
   # that actually builds on it, the number silently rots the first time a new
   # API is used - so read it from the manifest and hold it to it.

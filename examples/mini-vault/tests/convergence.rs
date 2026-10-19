@@ -196,7 +196,8 @@ async fn a_file_larger_than_the_relay_takes_is_left_out_named_once_and_the_rest_
     let first = a.vault.sync().await.unwrap();
     assert_eq!(first.pushed, 1);
     assert_eq!(first.too_large.len(), 1, "{first:?}");
-    assert!(first.too_large[0].starts_with("export.md - 20000 bytes"), "{first:?}");
+    assert_eq!((first.too_large[0].path.as_str(), first.too_large[0].len), ("export.md", 20_000));
+    assert!(first.too_large[0].to_string().starts_with("export.md - 20000 bytes, more than the "));
     // Named once for this version, not at every sync.
     assert!(a.vault.sync().await.unwrap().too_large.is_empty());
     b.sync().await;

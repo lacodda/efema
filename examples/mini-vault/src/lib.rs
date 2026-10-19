@@ -20,6 +20,7 @@
 //! and the folders converge.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -72,7 +73,7 @@ pub struct Summary {
     pub refused: Vec<String>,
     /// Local files left out, larger than the relay takes - each named once
     /// for each version of it.
-    pub too_large: Vec<String>,
+    pub too_large: Vec<TooLarge>,
 }
 
 /// What one push did.
@@ -81,7 +82,24 @@ pub struct Pushed {
     /// Local changes sent.
     pub sent: usize,
     /// Local files left out, larger than the relay takes, not named before.
-    pub too_large: Vec<String>,
+    pub too_large: Vec<TooLarge>,
+}
+
+/// A file left out: larger than the relay takes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TooLarge {
+    /// The file, relative to the folder.
+    pub path: String,
+    /// Its size.
+    pub len: usize,
+    /// The largest item the relay takes.
+    pub max: usize,
+}
+
+impl fmt::Display for TooLarge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} - {} bytes, more than the {} the relay takes", self.path, self.len, self.max)
+    }
 }
 
 /// A folder and what the device knows about it.
@@ -175,7 +193,7 @@ impl<T: Transport> Vault<T> {
             let change = Change { path: path.clone(), content: Some(content.into()), base: self.base(path) };
             if minicbor::to_vec(&change).expect("encoding into a vector").len() > max {
                 if self.too_large.insert(path.clone(), *hash) != Some(*hash) {
-                    pushed.too_large.push(format!("{path} - {len} bytes, more than the {max} the relay takes"));
+                    pushed.too_large.push(TooLarge { path: path.clone(), len, max });
                 }
                 continue;
             }
