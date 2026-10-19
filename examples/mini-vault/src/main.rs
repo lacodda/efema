@@ -125,6 +125,9 @@ fn report(summary: &Summary) {
     for refused in &summary.refused {
         eprintln!("skipped: {refused}");
     }
+    for file in &summary.too_large {
+        eprintln!("not sent: {file}");
+    }
 }
 
 fn inside(path: &Path, folder: &Path) -> Result<bool> {

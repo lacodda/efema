@@ -84,11 +84,15 @@ impl Device {
 }
 
 async fn relay() -> (Remote, oneshot::Sender<()>, TempDir) {
+    relay_with(efema_server::Config::default()).await
+}
+
+async fn relay_with(config: efema_server::Config) -> (Remote, oneshot::Sender<()>, TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let store = efema_server::store::Store::open(dir.path()).unwrap();
     let key = store.add_key(&"vaults".parse().unwrap(), efema_server::Access::Write, "").unwrap();
     drop(store);
-    let relay = efema_server::Relay::open(dir.path(), efema_server::Config::default()).unwrap();
+    let relay = efema_server::Relay::open(dir.path(), config).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = oneshot::channel::<()>();
@@ -178,6 +182,34 @@ async fn three_devices_converge() {
     for version in ["a", "b", "c", "c alone"] {
         assert!(contents.contains(version), "{version} was lost: {files:?}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_larger_than_the_relay_takes_is_left_out_named_once_and_the_rest_goes() {
+    let limits = efema_server::Limits { entry: 16 * 1024, ..efema_server::Limits::default() };
+    let (remote, _stop, _dir) = relay_with(efema_server::Config { limits, ..Default::default() }).await;
+    let (mut a, mut b) = (Device::open(&remote).await, Device::open(&remote).await);
+    let large = "x".repeat(20_000);
+    a.write("notes.md", "fits");
+    a.write("export.md", &large);
+
+    let first = a.vault.sync().await.unwrap();
+    assert_eq!(first.pushed, 1);
+    assert_eq!(first.too_large.len(), 1, "{first:?}");
+    assert!(first.too_large[0].starts_with("export.md - 20000 bytes"), "{first:?}");
+    // Named once for this version, not at every sync.
+    assert!(a.vault.sync().await.unwrap().too_large.is_empty());
+    b.sync().await;
+    assert_eq!(b.files().keys().collect::<Vec<_>>(), ["notes.md"]);
+
+    // A new version is named again; once it fits, it goes.
+    a.write("export.md", &"y".repeat(20_000));
+    assert_eq!(a.vault.sync().await.unwrap().too_large.len(), 1);
+    a.write("export.md", "trimmed");
+    assert_eq!(a.vault.sync().await.unwrap().pushed, 1);
+    settle(&mut [&mut a, &mut b]).await;
+    assert_eq!(a.files(), b.files());
+    assert_eq!(b.files()["export.md"], "trimmed");
 }
 
 #[tokio::test(flavor = "multi_thread")]

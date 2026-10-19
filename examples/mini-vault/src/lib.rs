@@ -4,7 +4,9 @@
 //! efema moves sealed items in one order for everyone; everything here is
 //! what it leaves to the app: what an item means (a [`Change`] to one file),
 //! how the app finds its own changes (an index of what the stream says each
-//! file is), and what it does when two devices changed one file (keeps both).
+//! file is), what it does when two devices changed one file (keeps both), and
+//! what it does with a file larger than the relay takes (leaves it out, and
+//! says so).
 //!
 //! # Merging
 //!
@@ -68,6 +70,18 @@ pub struct Summary {
     pub conflicts: Vec<String>,
     /// Remote changes refused, with the reason.
     pub refused: Vec<String>,
+    /// Local files left out, larger than the relay takes - each named once
+    /// for each version of it.
+    pub too_large: Vec<String>,
+}
+
+/// What one push did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Pushed {
+    /// Local changes sent.
+    pub sent: usize,
+    /// Local files left out, larger than the relay takes, not named before.
+    pub too_large: Vec<String>,
 }
 
 /// A folder and what the device knows about it.
@@ -83,6 +97,9 @@ pub struct Vault<T> {
     /// Local edits made on top of a version the stream has since replaced:
     /// the version they were made on.
     held: BTreeMap<String, Option<Digest32>>,
+    /// Files left out as larger than the relay takes, by the version that
+    /// was: named once, not at every sync.
+    too_large: BTreeMap<String, Digest32>,
 }
 
 impl<T: Transport> Vault<T> {
@@ -96,6 +113,7 @@ impl<T: Transport> Vault<T> {
             stream: BTreeMap::new(),
             in_flight: BTreeMap::new(),
             held: BTreeMap::new(),
+            too_large: BTreeMap::new(),
         };
         vault.load()?;
         Ok(vault)
@@ -113,7 +131,9 @@ impl<T: Transport> Vault<T> {
         // place before anything changed since.
         self.client.send().await?;
         let mut summary = self.pull().await?;
-        summary.pushed = self.push().await?;
+        let pushed = self.push().await?;
+        summary.pushed = pushed.sent;
+        summary.too_large = pushed.too_large;
         Ok(summary)
     }
 
@@ -135,8 +155,11 @@ impl<T: Transport> Vault<T> {
         }
     }
 
-    /// Sends every local change, as one push.
-    pub async fn push(&mut self) -> Result<usize> {
+    /// Sends every local change, as one push. A file larger than the relay
+    /// takes is left out - the rest of the folder still goes - and named.
+    pub async fn push(&mut self) -> Result<Pushed> {
+        let max = self.client.max_item_len().await?;
+        let mut pushed = Pushed::default();
         let mut changes = Vec::new();
         let mut flying = Vec::new();
         let on_disk = scan(&self.folder)?;
@@ -148,7 +171,16 @@ impl<T: Transport> Vault<T> {
                 continue;
             }
             let content = fs::read(self.folder.join(path)).with_context(|| format!("reading {path}"))?;
-            changes.push(Change { path: path.clone(), content: Some(content.into()), base: self.base(path) });
+            let len = content.len();
+            let change = Change { path: path.clone(), content: Some(content.into()), base: self.base(path) };
+            if minicbor::to_vec(&change).expect("encoding into a vector").len() > max {
+                if self.too_large.insert(path.clone(), *hash) != Some(*hash) {
+                    pushed.too_large.push(format!("{path} - {len} bytes, more than the {max} the relay takes"));
+                }
+                continue;
+            }
+            self.too_large.remove(path);
+            changes.push(change);
             flying.push((path.clone(), Some(*hash)));
         }
         // Removed here: a file the stream has, or one sent from here and not
@@ -162,8 +194,10 @@ impl<T: Transport> Vault<T> {
             changes.push(Change { path: path.clone(), content: None, base: self.base(path) });
             flying.push((path.clone(), None));
         }
+        // Gone from here: nothing to leave out any more.
+        self.too_large.retain(|path, _| on_disk.contains_key(path));
         if changes.is_empty() {
-            return Ok(0);
+            return Ok(pushed);
         }
         let items: Vec<Vec<u8>> =
             changes.iter().map(|c| minicbor::to_vec(c).expect("encoding into a vector")).collect();
@@ -179,7 +213,8 @@ impl<T: Transport> Vault<T> {
             self.save()?;
         }
         sent?;
-        Ok(changes.len())
+        pushed.sent = changes.len();
+        Ok(pushed)
     }
 
     /// The version a local change of `path` is made on: the one still in

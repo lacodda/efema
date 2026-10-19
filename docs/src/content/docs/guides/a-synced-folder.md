@@ -95,6 +95,12 @@ app's, and mini-vault does it the way a real app has to:
   partway - `Error::Unsent` - the changes are already in the client's queue,
   so the index counts them as sent, and the next scan does not send them a
   second time. Each sync starts by sending what an earlier one left waiting.
+- **A file larger than the relay takes is left out, and named** - `not sent:`
+  with its size and the limit, once for each version of it - while the rest
+  of the folder goes. One push carries every change; a single database or
+  video in the folder would otherwise hold back every note beside it. The
+  limit is the relay's (`Client::max_item_len`, 8 MiB less a little by
+  default), so a file that fits one relay may not fit another.
 - **The network comes and goes**: a sync that stops is reported and tried
   again a few seconds later, instead of ending the app.
 
@@ -118,9 +124,9 @@ meet in the stream as one file.
 ## What it does not do
 
 It is an example, and stops where an example should: no file larger than one
-request (16 MiB less a little), no renames (a rename is a removal and a new
-file), no watching the folder for changes (it looks every few seconds, and
-whenever the relay says another device wrote).
+entry - such a file is left out, not cut into pieces - no renames (a rename is
+a removal and a new file), no watching the folder for changes (it looks every
+few seconds, and whenever the relay says another device wrote).
 
 ## Related
 
