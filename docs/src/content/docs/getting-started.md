@@ -5,16 +5,27 @@ description: Install the efema relay, hand out a key, run it, and look at what i
 
 ## Install
 
-With a Rust toolchain:
+On Linux - x86_64 or 64-bit ARM, a Raspberry Pi among them - and on macOS on
+Apple silicon:
 
 ```console
-$ cargo install efema-server
+$ curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/install.sh | sh
 ```
 
-Or download the archive for your platform from the
-[latest release](https://github.com/lacodda/efema/releases/latest) - Linux on
-x86_64 and on 64-bit ARM (a Raspberry Pi), Windows and macOS on Apple silicon -
-and put `efema-server` somewhere on your `PATH`.
+On Windows, in PowerShell:
+
+```console
+> irm https://raw.githubusercontent.com/lacodda/efema/main/tools/install.ps1 | iex
+```
+
+Either puts `efema-server` from the latest release in your user's programs
+(`~/.local/bin`, `%LOCALAPPDATA%\Programs\efema`); `EFEMA_VERSION=v0.6.0` pins a
+release and `EFEMA_INSTALL_DIR` picks the directory. With a Rust toolchain,
+`cargo install efema-server` builds it instead, and the archives are on the
+[latest release](https://github.com/lacodda/efema/releases/latest).
+
+To run it as a service on a Linux server, see
+[On a server](/efema/guides/on-a-server/).
 
 ## Hand out a key
 

@@ -18,7 +18,7 @@ proxy that forwards plain HTTP, or forwards without saying, is refused.
 
 ## Caddy
 
-```caddyfile
+```text title="Caddyfile"
 relay.example.com {
 	reverse_proxy 127.0.0.1:2451
 }
@@ -31,7 +31,7 @@ reached it. Nothing else is needed.
 On a home network with a private name (`relay.home.arpa`, say), use Caddy's own
 certificate authority and install its root on your devices:
 
-```caddyfile
+```text title="Caddyfile"
 relay.home.arpa {
 	tls internal
 	reverse_proxy 127.0.0.1:2451

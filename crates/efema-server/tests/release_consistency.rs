@@ -451,3 +451,46 @@ fn the_changelog_has_the_version_being_released() {
         "CHANGELOG.md has no section for {version}: generate it with `git cliff --tag v{version} --output CHANGELOG.md`"
     );
 }
+
+/// The text between `start` and the next line that is `end`, both excluded.
+fn between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
+    let from = text.find(start).unwrap_or_else(|| panic!("no {start:?}")) + start.len();
+    let rest = &text[from..];
+    let to = rest.find(&format!("\n{end}\n")).unwrap_or_else(|| panic!("no {end:?} after {start:?}"));
+    rest[..to].trim_start_matches('\n')
+}
+
+#[test]
+fn the_service_page_shows_the_unit_the_script_writes() {
+    // An operator reads the unit on the page and runs the script that writes
+    // it: two copies of one file, held to one here.
+    let script = read("tools/service.sh");
+    let unit = between(&script, "<<'UNIT'", "UNIT");
+    assert!(unit.starts_with("[Unit]"), "the unit in tools/service.sh was not found: {unit:?}");
+    let page = read("docs/src/content/docs/guides/on-a-server.md");
+    let shown = between(&page, "```ini", "```");
+    assert_eq!(shown, unit, "the unit on guides/on-a-server.md is not the one tools/service.sh writes");
+}
+
+#[test]
+fn every_installer_asks_for_an_archive_the_release_makes() {
+    let release = read(".github/workflows/release.yml");
+    let built: Vec<&str> = release.lines().filter_map(|l| l.trim().strip_prefix("target: ")).map(str::trim).collect();
+    assert!(built.len() >= 4, "could not read the release targets: {built:?}");
+
+    let unix = read("tools/install.sh");
+    let asked: Vec<&str> = unix.lines().filter_map(|l| l.split("TARGET=\"").nth(1)?.split('"').next()).collect();
+    assert!(asked.len() >= 3, "could not read the targets install.sh asks for: {asked:?}");
+    for target in &asked {
+        assert!(built.contains(target), "install.sh asks for {target}, which release.yml does not build");
+    }
+    assert!(unix.contains("$NAME.tar.gz") && release.contains("tar czf \"$name.tar.gz\""));
+
+    let windows = read("tools/install.ps1");
+    let target = windows
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("$name = \"efema-server-$tag-")?.strip_suffix('"'))
+        .expect("install.ps1 names its archive");
+    assert!(built.contains(&target), "install.ps1 asks for {target}, which release.yml does not build");
+    assert!(windows.contains("$name.zip") && release.contains("\"$name.zip\""));
+}

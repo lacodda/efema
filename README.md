@@ -93,15 +93,21 @@ SEQ  EPOCH      SIZE  HASH
 
 ## Install
 
-The relay:
+The relay, on Linux (x86_64 and ARM64) and macOS:
 
 ```console
-$ cargo install efema-server
+$ curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/install.sh | sh
 ```
 
-Or download the archive for your platform - Linux on x86_64 and ARM64,
-Windows, macOS on Apple silicon - from the
-[latest release](https://github.com/lacodda/efema/releases/latest).
+On Windows:
+
+```console
+> irm https://raw.githubusercontent.com/lacodda/efema/main/tools/install.ps1 | iex
+```
+
+Or `cargo install efema-server`. As a service on a Linux server - its own
+user, systemd, upgrades that copy the data aside first - see
+[On a server](https://lacodda.github.io/efema/guides/on-a-server/).
 
 The client, in a Rust app:
 
