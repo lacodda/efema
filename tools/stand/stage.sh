@@ -11,13 +11,16 @@
 set -eu
 
 out=${1:-deploy}
-here="$(cd "$(dirname "$0")/../.." && pwd)"
-
 rm -rf "$out"
 mkdir -p "$out"
-git -C "$here" show HEAD:tools/install.sh >"$out/install.sh"
-git -C "$here" show HEAD:tools/service.sh >"$out/service.sh"
-version=$(git -C "$here" show HEAD:Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p' | head -n 1)
+out=$(cd "$out" && pwd)
+# git is asked from inside the repository rather than handed its path: on
+# Windows a path given to git.exe from a POSIX shell is not always translated.
+cd "$(dirname "$0")/../.."
+
+git show HEAD:tools/install.sh >"$out/install.sh"
+git show HEAD:tools/service.sh >"$out/service.sh"
+version=$(git show HEAD:Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p' | head -n 1)
 case "$version" in
     [0-9]*) ;;
     *)
