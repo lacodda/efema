@@ -1,0 +1,76 @@
+name: Install
+
+# The installers, run the way a person runs them, against a real release: the
+# one the Release workflow just made, the one asked for, or the latest when
+# the scripts change. Each run checks the version that answers, so green means
+# the release can be installed as the README says. On Linux the relay is also
+# set up as a service, twice: the second time is an upgrade, which stops it,
+# copies its data aside and starts it again.
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  push:
+    branches: [main]
+    paths: ['tools/install.ps1', 'tools/install.sh', 'tools/service.sh', '.github/workflows/install.yml']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release to install - empty for the latest
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  # A tag push names its tag as the branch of the run it started; empty means
+  # the latest release.
+  EFEMA_VERSION: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || inputs.tag }}
+
+jobs:
+  unix:
+    name: ${{ matrix.os }}
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        # The ARM runner stands for a Raspberry Pi.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      # Piped into sh, as the README says - not run as a file.
+      - name: Install
+        run: cat tools/install.sh | sh
+      - name: Check what answers
+        run: |
+          version=$("$HOME/.local/bin/efema-server" --version)
+          echo "$version"
+          if [ -n "$EFEMA_VERSION" ]; then test "$version" = "efema-server ${EFEMA_VERSION#v}"; fi
+      - name: As a service, set up and upgraded
+        if: runner.os == 'Linux'
+        run: |
+          cat tools/install.sh | sudo EFEMA_VERSION="$EFEMA_VERSION" EFEMA_INSTALL_DIR=/usr/local/bin sh
+          sudo sh tools/service.sh
+          sudo -u efema efema-server keys add ci write --label install --data /var/lib/efema >/dev/null
+          sudo sh tools/service.sh
+          test -n "$(sudo ls /var/lib/efema.backups)"
+          curl -fsS http://127.0.0.1:2451/health
+          sudo -u efema efema-server keys --data /var/lib/efema
+
+  windows:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Piped into iex, as the README says - not run as a file, which would
+      # forgive what iex does not.
+      - name: Install
+        shell: powershell
+        run: Get-Content -Raw tools/install.ps1 | Invoke-Expression
+      - name: Check what answers
+        shell: powershell
+        run: |
+          $version = & (Join-Path $env:LOCALAPPDATA "Programs\efema\efema-server.exe") --version
+          $version
+          if ($env:EFEMA_VERSION -and $version -ne "efema-server $($env:EFEMA_VERSION.TrimStart('v'))") { throw "installed $version" }

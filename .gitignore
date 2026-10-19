@@ -24,3 +24,9 @@ GEMINI.md
 .windsurfrules
 .github/copilot-instructions.md
 openspec/
+
+# What turnout uploads to a stand (tools/stand/stage.sh)
+/deploy/
+.env.development.local
+# turnout keeps the gateway address here for apps with a dev server
+.env.*.local
