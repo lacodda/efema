@@ -27,6 +27,8 @@ tear.offline();             // the network gone: open ones torn, new ones reset
 tear.online();
 tear.stall();               // bytes held, connections open and silent
 tear.flow();
+tear.throttle(16_000);      // 16 kB a second each way: slow, still moving
+tear.unthrottle();
 assert_eq!(tear.torn(), 1);
 ```
 

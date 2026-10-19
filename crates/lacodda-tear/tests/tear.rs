@@ -221,6 +221,27 @@ async fn a_stall_holds_bytes_until_they_flow() {
 }
 
 #[tokio::test]
+async fn a_throttle_passes_bytes_at_its_rate_until_lifted() {
+    let tear = Tear::start(echo().await).await.unwrap();
+    let mut socket = open(&tear).await;
+    let payload = vec![7u8; 40_000];
+
+    // 40 kB each way at 20 kB a second: two seconds, the two ways together.
+    tear.throttle(20_000);
+    let started = Instant::now();
+    round_trip(&mut socket, &payload).await;
+    let throttled = started.elapsed();
+    assert!(throttled >= Duration::from_millis(1_800), "40 kB passed in {throttled:?}");
+
+    tear.unthrottle();
+    let started = Instant::now();
+    round_trip(&mut socket, &payload).await;
+    let lifted = started.elapsed();
+    assert!(lifted < Duration::from_secs(1), "still throttled: {lifted:?}");
+    assert_eq!(tear.torn(), 0);
+}
+
+#[tokio::test]
 async fn a_server_that_is_not_there_resets_the_client() {
     let gone = {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

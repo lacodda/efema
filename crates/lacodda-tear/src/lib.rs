@@ -18,7 +18,9 @@
 //! - [`Tear::offline`] and [`Tear::online`] - the network gone: open
 //!   connections torn, new ones reset at once, until it is back;
 //! - [`Tear::stall`] and [`Tear::flow`] - bytes held, the connection open and
-//!   silent, as on a network that drops packets without saying so.
+//!   silent, as on a network that drops packets without saying so;
+//! - [`Tear::throttle`] and [`Tear::unthrottle`] - bytes passed at so many a
+//!   second, as on a slow network that keeps moving.
 //!
 //! Byte counts run across every connection from the moment a cut is armed,
 //! not per connection: an HTTP client that reuses a pooled connection for
@@ -114,7 +116,12 @@ struct Rules {
     /// Bytes left before the tear, back from the server.
     down: Option<usize>,
     offline: bool,
+    /// Bytes a second each way on each connection; `None` when unthrottled.
+    rate: Option<usize>,
 }
+
+/// How often a throttled connection passes its next slice of bytes.
+const TICK: Duration = Duration::from_millis(100);
 
 impl Tear {
     /// A proxy in front of `upstream`, listening on a free port of the
@@ -198,6 +205,18 @@ impl Tear {
     /// Lets bytes move again after [`Tear::stall`].
     pub fn flow(&self) {
         self.shared.flowing.send_replace(true);
+    }
+
+    /// Passes bytes at `bytes_per_second` - at least one - each way on each
+    /// connection, open or new, a tenth of a second's worth at a time: a slow
+    /// network that keeps moving, until [`Tear::unthrottle`].
+    pub fn throttle(&self, bytes_per_second: usize) {
+        self.shared.rules().rate = Some(bytes_per_second.max(1));
+    }
+
+    /// Passes bytes as fast as they come again after [`Tear::throttle`].
+    pub fn unthrottle(&self) {
+        self.shared.rules().rate = None;
     }
 
     /// How many connections the proxy has accepted.
@@ -376,11 +395,18 @@ async fn pump(from: &mut OwnedReadHalf, to: &mut OwnedWriteHalf, direction: Dire
             return Flow::Failed;
         }
         let (pass, cut) = shared.take(direction, len);
-        if pass > 0 {
-            if to.write_all(&buffer[..pass]).await.is_err() {
+        let mut rest = &buffer[..pass];
+        while !rest.is_empty() {
+            let rate = shared.rules().rate;
+            let slice = rate.map_or(rest.len(), |rate| rest.len().min((rate / 10).max(1)));
+            if to.write_all(&rest[..slice]).await.is_err() {
                 return Flow::Failed;
             }
-            shared.passed(direction, pass);
+            shared.passed(direction, slice);
+            rest = &rest[slice..];
+            if rate.is_some() {
+                tokio::time::sleep(TICK).await;
+            }
         }
         if cut {
             return Flow::Cut;
