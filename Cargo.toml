@@ -60,6 +60,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # `tls internal`) is trusted once the CA is installed on the device.
 # Tests talk to the relay over a real socket through it, the way a client does.
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+# The vocabulary of reqwest's own body type, for a request body handed to the
+# connection a piece at a time: each piece taken is progress, the way the
+# client tells a stalled connection from a slow one.
+bytes = "1"
+http-body = "1"
 tempfile = "3"
 
 # Argon2id is meant to be expensive, and an unoptimized build makes it about

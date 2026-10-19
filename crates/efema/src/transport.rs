@@ -71,6 +71,17 @@ pub enum TransportError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    /// The connection went silent: nothing moved on it for as long as the
+    /// request allowed - [`STALL`](crate::STALL), or a wait's time and that
+    /// on top. A network that dropped without a word, or a proxy whose
+    /// upstream hung.
+    #[error("{at} went silent: nothing moved on the connection for {} s", .quiet.as_secs())]
+    Stalled {
+        /// Where the transport tried to go.
+        at: String,
+        /// How long nothing moved.
+        quiet: Duration,
+    },
     /// Something answered, but not in the protocol: not an efema relay, or a
     /// proxy in front of it answering for itself.
     #[error("{at} answered something that is not the efema protocol: {reason}")]

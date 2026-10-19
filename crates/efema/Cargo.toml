@@ -17,7 +17,9 @@ categories = ["network-programming", "cryptography"]
 efema-proto.workspace = true
 lacodda-seal.workspace = true
 
+bytes.workspace = true
 getrandom.workspace = true
+http-body.workspace = true
 minicbor.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true
@@ -33,5 +35,7 @@ efema-server.workspace = true
 # before this crate, like efema-server.
 lacodda-tear.workspace = true
 tempfile.workspace = true
-tokio.workspace = true
+# A paused clock: how long a request may stay still is shown in seconds that
+# do not have to pass.
+tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true

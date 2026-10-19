@@ -149,6 +149,16 @@ treats all three the same way, and none of them loses or doubles a change.
   pushed since.
 - **A torn read moves nothing.** The cursor moves only with `ack`, so the next
   `pull` reads from the last page the app applied - not from the start.
+- **A silent connection is given up on; a slow one is not.** A network that
+  drops without a word, or a proxy whose upstream hung, leaves a connection
+  open with nothing moving on it. Once nothing has moved for `efema::STALL`
+  (30 seconds) the request stops with `TransportError::Stalled`, and a push
+  is kept like any other. A request that keeps moving is never cut, however
+  long it takes: a large batch going up a slow network is waited for. Once
+  the last of a request is handed to the connection, the answer has the same
+  30 seconds to begin - plus the time the end of the request may still spend
+  in buffers on its way up, on a network as slow as 64 kbit/s; a wait has its
+  own time on top.
 
 So the app's part is to send again, at a moment of its choosing:
 

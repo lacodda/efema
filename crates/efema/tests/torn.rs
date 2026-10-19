@@ -3,16 +3,18 @@
 //!
 //! A proxy (lacodda-tear) stands between the client and a real relay and
 //! tears a connection on cue: partway up a request, before or partway down
-//! an answer, or all of them at once, as a phone going offline. What the
-//! relay holds is then asked of the relay itself, around the proxy.
+//! an answer, or all of them at once, as a phone going offline - or holds
+//! its bytes, or lets them through slowly. What the relay holds is then asked
+//! of the relay itself, around the proxy.
 
 mod common;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use common::{Between, Device, TornRelay, data, drain, name, noise, unsent};
-use efema::{Compression, Epoch, Error, Limits};
+use efema::{Compression, Epoch, Error, Limits, STALL, TransportError};
 use lacodda_tear::{Cut, Direction};
 
 /// The push stopped, its items are kept, and the network is why.
@@ -154,6 +156,84 @@ async fn a_pull_torn_partway_resumes_from_the_acknowledged_cursor() {
     all.extend(again.entries);
     all.extend(drain(&on_phone).await);
     assert_eq!(data(&all), items.iter().map(Vec::as_slice).collect::<Vec<_>>());
+}
+
+/// The connection went silent, and the client said so.
+fn stalled(error: &Error) {
+    assert!(
+        matches!(error, Error::Transport(TransportError::Stalled { quiet, .. }) if *quiet >= STALL),
+        "stopped by {error:?}, not by a stall"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_gone_silent_is_given_up_and_what_waited_lands_once() {
+    let torn = TornRelay::start().await;
+    let (laptop, phone) = (Device::new(), Device::new());
+    let on_laptop = laptop.open(torn.through(), "notes", 1).await;
+    let on_phone = phone.open(torn.through(), "notes", 1).await;
+    let head = torn.head("notes").await;
+
+    // The connections stay open, and nothing moves on them either way - as
+    // on a network that dropped without a word.
+    torn.tear.stall();
+    let started = Instant::now();
+    let (pushed, pulled, waited) = tokio::join!(
+        on_laptop.push([b"written in a tunnel".as_slice()]),
+        on_phone.pull(),
+        on_phone.wait(Duration::ZERO),
+    );
+    let took = started.elapsed();
+    let (waiting, source) = unsent(pushed);
+    assert_eq!(waiting, 1);
+    stalled(&source);
+    stalled(&pulled.unwrap_err());
+    stalled(&waited.unwrap_err());
+    assert!(took >= STALL && took < STALL + Duration::from_secs(15), "given up after {took:?}");
+
+    // The network moves again: what waited goes, and lands once - whether or
+    // not the stalled request reached the relay when its bytes were let go.
+    torn.tear.flow();
+    let sent = on_laptop.send().await.unwrap();
+    assert_eq!(sent.items, 1);
+    assert_eq!(torn.head("notes").await, head + 1, "the batch was written twice");
+    assert_eq!(data(&drain(&on_phone).await), [b"written in a tunnel".as_slice()]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_connection_that_keeps_moving_is_never_cut() {
+    let torn = TornRelay::start().await;
+    let (laptop, phone, desktop) = (Device::new(), Device::new(), Device::new());
+    // 700 kB each way at 20 kB a second: longer than STALL, a request at a
+    // time, with bytes moving all the while.
+    let items: Vec<Vec<u8>> = (0..10).map(|i| noise(70_000, i)).collect();
+    desktop.open(torn.direct(), "down", 1).await.with_compression(Compression::Off).push(&items).await.unwrap();
+    let on_laptop = laptop.open(torn.through(), "up", 1).await.with_compression(Compression::Off);
+    let on_phone = phone.open(torn.through(), "down", 1).await;
+
+    torn.tear.throttle(20_000);
+    let started = Instant::now();
+    let (pushed, pulled) = tokio::join!(
+        async {
+            let sent = on_laptop.push(&items).await;
+            (sent, started.elapsed())
+        },
+        async {
+            let pulled = on_phone.pull().await;
+            (pulled, started.elapsed())
+        },
+    );
+    let (sent, push_took) = pushed;
+    let (pulled, pull_took) = pulled;
+    let sent = sent.unwrap();
+    let pulled = pulled.unwrap();
+    assert!(push_took > STALL && pull_took > STALL, "not slow enough to show anything: {push_took:?}, {pull_took:?}");
+    assert_eq!(sent.items, items.len());
+    assert_eq!(data(&pulled.entries), items.iter().map(Vec::as_slice).collect::<Vec<_>>());
+    torn.tear.unthrottle();
+    on_phone.ack(&pulled).await.unwrap();
+    let on_desktop = desktop.open(torn.direct(), "up", 1).await;
+    assert_eq!(data(&drain(&on_desktop).await), items.iter().map(Vec::as_slice).collect::<Vec<_>>());
 }
 
 #[tokio::test(flavor = "multi_thread")]

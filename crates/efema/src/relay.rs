@@ -5,22 +5,22 @@ use std::time::Duration;
 
 use efema_proto::wire::{self, Batch, Heads, Limits, Page, Problem, Watch, Written};
 use efema_proto::{AccessKey, Cursor, MEDIA_TYPE, StreamName};
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
-use reqwest::{RequestBuilder, Response, Url};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::{RequestBuilder, StatusCode, Url};
 
+use crate::stall::{Pulse, STALL, Upload};
 use crate::transport::{Transport, TransportError};
 
-/// How long a write or a read may take as a whole. Generous: a full request
-/// body is 16 MiB, and a phone on a poor network moves that slowly.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 /// How long reaching the relay may take.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-/// How much longer than the wait itself a wait request may take, for the
-/// round trip around it.
-const WAIT_SLACK: Duration = Duration::from_secs(30);
 
 /// An efema relay, reached over HTTPS - or over plain HTTP on this machine -
 /// with an access key that opens one of its spaces.
+///
+/// A request takes as long as it keeps moving: a large batch going up a slow
+/// network is waited for, and a connection on which nothing has moved for
+/// [`STALL`](crate::STALL) is given up on as
+/// [`TransportError::Stalled`] - what was being pushed stays on the device.
 ///
 /// HTTPS is verified against the platform's trust store, so a relay behind a
 /// proxy with a private certificate authority is trusted once that authority
@@ -109,28 +109,74 @@ impl Relay {
         TransportError::Unreachable { at: self.base.clone(), source: Box::new(source.without_url()) }
     }
 
-    async fn answer<T: for<'b> minicbor::Decode<'b, ()>>(&self, response: Response) -> Result<T, TransportError> {
-        let status = response.status();
-        let cbor =
-            response.headers().get(CONTENT_TYPE).and_then(|value| value.to_str().ok()).is_some_and(|value| {
-                value.split(';').next().unwrap_or_default().trim().eq_ignore_ascii_case(MEDIA_TYPE)
-            });
-        if !cbor {
-            return Err(TransportError::NotProtocol {
-                at: self.base.clone(),
-                reason: format!("a {status} answer that is not {MEDIA_TYPE}"),
-            });
-        }
-        let body = response.bytes().await.map_err(|e| self.unreachable(e))?;
+    /// Sends `request` with the key on it - and `body`, if it has one - and
+    /// reads the answer whole, giving up once nothing has moved for
+    /// [`STALL`]. Once the request is handed over, the answer has
+    /// `answer_within` to begin.
+    async fn exchange<T: for<'b> minicbor::Decode<'b, ()>>(
+        &self,
+        request: RequestBuilder,
+        body: Option<Vec<u8>>,
+        answer_within: Duration,
+    ) -> Result<T, TransportError> {
+        let request = self.authorized(request);
+        let (request, pulse) = match body {
+            Some(body) => {
+                let pulse = Pulse::new(STALL);
+                let upload = Upload::new(body, pulse.clone(), answer_within);
+                let request = request
+                    .header(CONTENT_TYPE, HeaderValue::from_static(MEDIA_TYPE))
+                    .body(reqwest::Body::wrap(upload));
+                (request, pulse)
+            }
+            None => (request, Pulse::new(answer_within)),
+        };
+        let talk = async {
+            let mut response = request.send().await.map_err(|e| self.unreachable(e))?;
+            pulse.beat(STALL);
+            let status = response.status();
+            if !is_protocol(response.headers()) {
+                return Err(TransportError::NotProtocol {
+                    at: self.base.clone(),
+                    reason: format!("a {status} answer that is not {MEDIA_TYPE}"),
+                });
+            }
+            let mut body = Vec::new();
+            while let Some(piece) = response.chunk().await.map_err(|e| self.unreachable(e))? {
+                pulse.beat(STALL);
+                body.extend_from_slice(&piece);
+            }
+            Ok((status, body))
+        };
+        let (status, body) = tokio::select! {
+            answer = talk => answer?,
+            quiet = pulse.silence() => return Err(TransportError::Stalled { at: self.base.clone(), quiet }),
+        };
+        self.decode(status, &body)
+    }
+
+    fn decode<T: for<'b> minicbor::Decode<'b, ()>>(
+        &self,
+        status: StatusCode,
+        body: &[u8],
+    ) -> Result<T, TransportError> {
         let not_protocol =
             |e: wire::WireError| TransportError::NotProtocol { at: self.base.clone(), reason: e.to_string() };
         if status.is_success() {
-            wire::decode(&body).map_err(not_protocol)
+            wire::decode(body).map_err(not_protocol)
         } else {
-            let problem: Problem = wire::decode(&body).map_err(not_protocol)?;
+            let problem: Problem = wire::decode(body).map_err(not_protocol)?;
             Err(TransportError::Refused { at: self.base.clone(), problem: Box::new(problem) })
         }
     }
+}
+
+/// Whether an answer says it is in the protocol.
+fn is_protocol(headers: &HeaderMap) -> bool {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(';').next().unwrap_or_default().trim().eq_ignore_ascii_case(MEDIA_TYPE))
 }
 
 impl fmt::Display for Relay {
@@ -151,22 +197,13 @@ impl Transport for Relay {
     }
 
     async fn limits(&self) -> Result<Limits, TransportError> {
-        let request = self.http.get(self.url(&format!("{}/limits", efema_proto::API_PREFIX))).timeout(REQUEST_TIMEOUT);
-        let response = self.authorized(request).send().await.map_err(|e| self.unreachable(e))?;
-        self.answer(response).await
+        let request = self.http.get(self.url(&format!("{}/limits", efema_proto::API_PREFIX)));
+        self.exchange(request, None, STALL).await
     }
 
     async fn append(&self, stream: &StreamName, batch: &Batch) -> Result<Written, TransportError> {
         let request = self.http.post(self.entries(stream));
-        let response = self
-            .authorized(request)
-            .header(CONTENT_TYPE, HeaderValue::from_static(MEDIA_TYPE))
-            .timeout(REQUEST_TIMEOUT)
-            .body(wire::encode(batch))
-            .send()
-            .await
-            .map_err(|e| self.unreachable(e))?;
-        self.answer(response).await
+        self.exchange(request, Some(wire::encode(batch)), STALL).await
     }
 
     async fn read(&self, stream: &StreamName, after: Option<&Cursor>, limit: usize) -> Result<Page, TransportError> {
@@ -175,9 +212,7 @@ impl Transport for Relay {
         if let Some(cursor) = after {
             url.push_str(&format!("&after={cursor}"));
         }
-        let request = self.http.get(url).timeout(REQUEST_TIMEOUT);
-        let response = self.authorized(request).send().await.map_err(|e| self.unreachable(e))?;
-        self.answer(response).await
+        self.exchange(self.http.get(url), None, STALL).await
     }
 
     async fn wait(&self, watches: &[Watch], timeout: Duration) -> Result<Heads, TransportError> {
@@ -185,9 +220,9 @@ impl Transport for Relay {
         for watch in watches {
             url.push_str(&format!("&watch={watch}"));
         }
-        let request = self.http.get(url).timeout(timeout + WAIT_SLACK);
-        let response = self.authorized(request).send().await.map_err(|e| self.unreachable(e))?;
-        self.answer(response).await
+        // The relay holds the answer until the stream moves or the time runs
+        // out: silence that long is the request working, not a stall.
+        self.exchange(self.http.get(url), None, timeout + STALL).await
     }
 }
 

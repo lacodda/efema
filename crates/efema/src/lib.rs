@@ -72,6 +72,11 @@
 //! many wait. A batch whose answer was lost goes again byte for byte, and the
 //! relay, which knows a batch by what it holds, does not write it twice.
 //!
+//! A connection that goes silent - a network dropped without a word, a proxy
+//! whose upstream hung - is given up on once nothing has moved on it for
+//! [`STALL`], and what was being sent waits like any other. A request that
+//! keeps moving is never cut, however slow the network.
+//!
 //! # Epochs
 //!
 //! A client writes in its app's epoch and reads up to it. When a newer
@@ -85,6 +90,7 @@ mod doctor;
 mod envelope;
 mod error;
 mod relay;
+mod stall;
 mod state;
 mod transport;
 
@@ -96,6 +102,7 @@ pub use envelope::{Compression, ENTRY_OVERHEAD};
 pub use error::Error;
 pub use lacodda_seal::{Key, KeyId, LockedKey};
 pub use relay::{InvalidUrl, Relay};
+pub use stall::STALL;
 pub use state::{DeviceId, Queue, State};
 pub use transport::{Transport, TransportError};
 
