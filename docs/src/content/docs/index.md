@@ -65,11 +65,14 @@ silently read past.
 
 ## Status
 
-0.5.0 is the relay and the Rust client library,
+0.6.0 is the relay and the Rust client library,
 [`efema`](https://docs.rs/efema), and a relay safe to leave reachable behind an
 HTTPS proxy: access keys to spaces, that read or that write; limits per key,
-announced and followed; plain HTTP from outside refused. Every entry is
-compressed and sealed on the device with a key the relay never has, kept there
-until the relay has it and written once however often a broken network sends
-it again - and each of those promises is shown by tests, not only stated.
+announced and followed; plain HTTP from outside refused. It installs with one
+command and runs as a service on a Linux server
+([On a server](/efema/guides/on-a-server/)). Every entry is compressed and
+sealed on the device with a key the relay never has, kept there until the
+relay has it and written once however often a broken network sends it again;
+a connection gone silent is given up on in half a minute, a slow one is never
+cut. Each of those promises is shown by tests, not only stated.
 [Syncing an app](/efema/guides/syncing-an-app/) is where to start.

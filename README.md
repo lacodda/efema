@@ -127,16 +127,10 @@ The model, sealing, the threat model, every command and the protocol:
 
 ## Status
 
-0.5.0 is the relay and the client library, safe to leave behind an HTTPS
-proxy: access keys to spaces, read or write; limits per key, announced and
-followed; plain HTTP from outside refused. Entries are compressed and sealed
-on the device, kept there until the relay has them, and written once however
-often a broken network sends them again. Tests listed in the threat model show
-what it promises. Alongside ship two crates of the line,
-[`lacodda-seal`](https://docs.rs/lacodda-seal) and
-[`lacodda-tear`](https://docs.rs/lacodda-tear). The first app to sync through
-it comes next. Changes:
-[CHANGELOG](https://github.com/lacodda/efema/blob/main/CHANGELOG.md).
+0.6.0 is the relay and the Rust client library: safe to leave behind an HTTPS
+proxy, set up as a service with two commands, and through a torn, silent or
+slow network a push lands once. The wire format may still change before 1.0.
+Changes: [CHANGELOG](https://github.com/lacodda/efema/blob/main/CHANGELOG.md).
 
 ## Contributing
 

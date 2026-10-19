@@ -11,8 +11,32 @@ stream is written in - gets a "Breaking Changes" section here, with the way
 across or a plain statement that there is none.
 
 `lacodda-seal` and `lacodda-tear` keep versions of their own (lacodda-seal
-0.1.0 since efema 0.2.0, lacodda-tear 0.1.0 since efema 0.4.0); their changes
+0.1.0 since efema 0.2.0, lacodda-tear 0.1.0 since efema 0.4.0 and 0.1.1 since 0.6.0); their changes
 are listed under the efema release they shipped with.
+
+## [0.6.0] - 2026-10-19
+
+### Features
+
+- Pass bytes slowly, as on a network that keeps moving
+- Give up on a connection gone silent, never on a slow one
+- Time the first sync of a vault, up and down
+- Install the relay with one command, and run it as a service on Linux
+
+### Bug Fixes
+
+- Leave out a file larger than the relay takes, not the whole folder
+- Ask git from inside the repository, not by its path
+
+### Documentation
+
+- Hold a request to progress, not to a clock
+- Install with one command, and run the relay on a server
+
+### Testing
+
+- Hold a long wait apart from a stall, and bound the stall test
+
 
 ## [0.5.0] - 2026-10-15
 

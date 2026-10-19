@@ -18,7 +18,7 @@ stream is written in - gets a "Breaking Changes" section here, with the way
 across or a plain statement that there is none.
 
 `lacodda-seal` and `lacodda-tear` keep versions of their own (lacodda-seal
-0.1.0 since efema 0.2.0, lacodda-tear 0.1.0 since efema 0.4.0); their changes
+0.1.0 since efema 0.2.0, lacodda-tear 0.1.0 since efema 0.4.0 and 0.1.1 since 0.6.0); their changes
 are listed under the efema release they shipped with.
 """
 body = """

@@ -3,7 +3,7 @@ members = ["crates/efema-proto", "crates/efema-server", "crates/efema", "crates/
 resolver = "3"
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.89"
 description = "A sync relay for local-first apps: it keeps changes in order and cannot read them"
@@ -13,9 +13,9 @@ repository = "https://github.com/lacodda/efema"
 homepage = "https://lacodda.github.io/efema/"
 
 [workspace.dependencies]
-efema-proto = { path = "crates/efema-proto", version = "0.5.0" }
-efema = { path = "crates/efema", version = "0.5.0" }
-efema-server = { path = "crates/efema-server", version = "0.5.0" }
+efema-proto = { path = "crates/efema-proto", version = "0.6.0" }
+efema = { path = "crates/efema", version = "0.6.0" }
+efema-server = { path = "crates/efema-server", version = "0.6.0" }
 lacodda-seal = { path = "crates/lacodda-seal", version = "0.1.0" }
 lacodda-tear = { path = "crates/lacodda-tear", version = "0.1.1" }
 
