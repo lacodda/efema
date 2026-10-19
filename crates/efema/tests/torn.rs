@@ -178,11 +178,17 @@ async fn a_connection_gone_silent_is_given_up_and_what_waited_lands_once() {
     // on a network that dropped without a word.
     torn.tear.stall();
     let started = Instant::now();
-    let (pushed, pulled, waited) = tokio::join!(
-        on_laptop.push([b"written in a tunnel".as_slice()]),
-        on_phone.pull(),
-        on_phone.wait(Duration::ZERO),
-    );
+    // Bounded here too: a client that never gives up fails the test, rather
+    // than hanging it.
+    let (pushed, pulled, waited) = tokio::time::timeout(STALL + Duration::from_secs(30), async {
+        tokio::join!(
+            on_laptop.push([b"written in a tunnel".as_slice()]),
+            on_phone.pull(),
+            on_phone.wait(Duration::ZERO),
+        )
+    })
+    .await
+    .expect("the client did not give up on a silent connection");
     let took = started.elapsed();
     let (waiting, source) = unsent(pushed);
     assert_eq!(waiting, 1);
@@ -198,6 +204,22 @@ async fn a_connection_gone_silent_is_given_up_and_what_waited_lands_once() {
     assert_eq!(sent.items, 1);
     assert_eq!(torn.head("notes").await, head + 1, "the batch was written twice");
     assert_eq!(data(&drain(&on_phone).await), [b"written in a tunnel".as_slice()]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wait_longer_than_stall_is_the_relay_working_not_a_stall() {
+    let torn = TornRelay::start().await;
+    let device = Device::new();
+    let client = device.open(torn.through(), "notes", 1).await;
+    // Read to the end first: a wait from behind the head returns at once.
+    drain(&client).await;
+    // A quiet stream: the relay holds the wait, and nothing moves, for
+    // longer than a stall - and that is how a wait is meant to go.
+    let asked = STALL + Duration::from_secs(10);
+    let started = Instant::now();
+    let moved = client.wait(asked).await.expect("a wait taken for a stall");
+    assert!(!moved, "nothing was written");
+    assert!(started.elapsed() >= asked, "the wait ended after {:?}", started.elapsed());
 }
 
 #[tokio::test(flavor = "multi_thread")]
