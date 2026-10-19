@@ -23,3 +23,4 @@ earlier one says so; the earlier one is marked superseded rather than deleted.
 | [0016](0016-an-access-key-opens-a-space.md) | An access key opens a space; a key reads, or reads and writes | Accepted |
 | [0017](0017-limits-are-announced-and-a-refused-queue-is-cut-again.md) | Limits are the operator's, announced per key; a queue refused as too large is cut again | Accepted |
 | [0018](0018-the-relay-answers-only-through-the-door.md) | The relay answers its own machine and HTTPS through the door, and nothing else | Accepted |
+| [0019](0019-a-request-is-held-to-progress-not-a-clock.md) | A request is held to progress, not to a clock | Accepted |
