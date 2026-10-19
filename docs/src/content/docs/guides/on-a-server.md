@@ -14,6 +14,7 @@ up, and the same two upgrade it.
 $ curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/install.sh | sudo EFEMA_INSTALL_DIR=/usr/local/bin sh
 Downloading https://github.com/lacodda/efema/releases/download/v0.6.0/efema-server-v0.6.0-aarch64-unknown-linux-gnu.tar.gz
 Installed efema-server 0.6.0 to /usr/local/bin/efema-server
+Next: https://lacodda.github.io/efema/getting-started/ - or, as a service on a Linux server, https://lacodda.github.io/efema/guides/on-a-server/
 $ curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/service.sh | sudo sh
 Made the system user efema
 efema-server 0.6.0 answers on port 2451, data in /var/lib/efema
@@ -125,8 +126,11 @@ database to a newer schema, and that only goes forward:
 
 ```console
 $ curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/install.sh | sudo EFEMA_INSTALL_DIR=/usr/local/bin sh
+Downloading https://github.com/lacodda/efema/releases/download/v0.6.0/efema-server-v0.6.0-aarch64-unknown-linux-gnu.tar.gz
+Installed efema-server 0.6.0 to /usr/local/bin/efema-server
+Next: https://lacodda.github.io/efema/getting-started/ - or, as a service on a Linux server, https://lacodda.github.io/efema/guides/on-a-server/
 $ curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/service.sh | sudo sh
-Copied /var/lib/efema to /var/lib/efema.backups/20261019T135640Z
+Copied /var/lib/efema to /var/lib/efema.backups/20261019T171419Z
 efema-server 0.6.0 answers on port 2451, data in /var/lib/efema
 ```
 
