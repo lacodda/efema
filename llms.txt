@@ -9,7 +9,8 @@ machine and HTTPS through a reverse proxy, holds each key to limits it
 announces, and never decodes, merges or judges an entry. Five crates: the wire
 format (`efema-proto`), the relay (`efema-server`), the client library that
 compresses and seals every entry on the device and keeps it there until the
-relay has it (`efema`), the sealing itself (`lacodda-seal`) and the proxy that
+relay has it - or keeps the stream in an S3 bucket itself, with no relay at
+all (`efema`), the sealing itself (`lacodda-seal`) and the proxy that
 tears connections in the tests (`lacodda-tear`); `examples/mini-vault` is an
 app built on the client. The repository was
 started by [lyrn](https://github.com/lacodda/lyrn) as its `workspace` form;

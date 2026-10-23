@@ -1,6 +1,6 @@
 ---
 title: A synced folder
-description: mini-vault, the example app - a folder of files kept the same on several devices through a relay, merging included.
+description: mini-vault, the example app - a folder of files kept the same on several devices through a relay or a bucket, merging included.
 ---
 
 `mini-vault` is a small, complete app on top of the client library: it keeps a
@@ -26,6 +26,11 @@ $ cargo run -p mini-vault -- --relay http://127.0.0.1:2451 --folder ./desktop --
 The key goes in `MINI_VAULT_KEY` (or `--key`), the passphrase in
 `MINI_VAULT_PASSPHRASE`. Two devices may share a key or have one each - a key
 each lets one be revoked without the other.
+
+Through an S3 bucket instead of a relay, `--bucket` and `--region` take the
+place of `--relay`, and the credentials come from `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` - the same run through a bucket is on
+[Without a server](/efema/guides/without-a-server/#a-folder-through-a-bucket).
 
 Each keeps its folder in sync until stopped: it sends what changed in the
 folder and applies what other devices sent, woken by the relay as soon as
@@ -142,13 +147,28 @@ The vault is made up, shaped like a working one: 5080 notes and attachments,
 half of them under 4 KB, one in a hundred over 240 KB, the largest a few MB.
 `--folder` syncs a folder of your own instead - it is only read - and
 `--relay` with `FIRST_SYNC_KEY` goes through a relay of yours rather than one
-started for the run. Each run seals with a passphrase of its own that is never
-shown, so what it leaves on a relay can be opened by no one.
+started for the run; `--bucket` with `--region` and the bucket's credentials
+in `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` goes through an S3 bucket.
+Each run seals with a passphrase of its own that is never shown, so what it
+leaves on a relay or in a bucket can be opened by no one.
+
+Through a bucket - a MinIO on the same machine - the same vault takes about as
+long:
+
+```console
+$ cargo run --release -p mini-vault --example first-sync -- --bucket http://127.0.0.1:29000/efema-test --region us-east-1 --limit 30
+vault  5080 files, 101.6 MiB (made up, seed 1)
+bucket http://127.0.0.1:29000/efema-test, stream first-sync-a212bb50
+up     5080 files in 6.7 s - the stream's key made in 0.4 s
+down   5080 files in 12.7 s - the key unlocked in 0.1 s
+check  both folders hold the same bytes
+limit  30 s up: within
+```
 
 The way up is the library's and the relay's - reading, compressing, sealing,
 keeping and sending every file, and the relay writing it - and `--limit`
-holds it: CI runs it on Linux and Windows on every change, and fails over 30
-seconds. The way down is mostly the app's: reading the stream takes under a
+holds it: CI runs it on Linux and Windows on every change, and through a
+MinIO bucket on Linux, and fails over 30 seconds. The way down is mostly the app's: reading the stream takes under a
 second, and writing thousands of new files is the operating system's slowest
 part of it.
 
@@ -157,7 +177,8 @@ part of it.
 It is an example, and stops where an example should: no file larger than one
 entry - such a file is left out, not cut into pieces - no renames (a rename is
 a removal and a new file), no watching the folder for changes (it looks every
-few seconds, and whenever the relay says another device wrote).
+few seconds, and whenever the relay says another device wrote - a bucket says
+nothing, and is looked at every few seconds).
 
 ## Related
 

@@ -1,6 +1,6 @@
 ---
 title: Syncing an app
-description: Use the efema client library in a Rust app - open a stream with an access key, push changes, pull and acknowledge, wait for news, keep working when the network breaks, change the passphrase, and handle what can go wrong.
+description: Use the efema client library in a Rust app - open a stream through a relay or a bucket, push changes, pull and acknowledge, wait for news, keep working when the network breaks, change the passphrase, and handle what can go wrong.
 ---
 
 The [`efema`](https://docs.rs/efema) crate is what an app links to. It seals
@@ -47,6 +47,10 @@ let notes = Client::open(
   device unlocks it with the same passphrase. After the first time, a device
   opens the stream without the network. ([Sealing](/efema/concepts/sealing/)
   has the details.)
+
+**No relay to run?** `Bucket` takes the place of `Relay` - an S3 bucket and
+its credentials - and everything on this page holds for it as it stands:
+[Without a server](/efema/guides/without-a-server/).
 
 An app that does not want to ask for the passphrase on every start can keep
 the key - `notes.key().to_bytes()` - where it keeps its most private data, and
@@ -201,7 +205,9 @@ if notes.wait(Duration::from_secs(30)).await? {
 
 One request sleeps on the relay until the stream moves past the device's
 acknowledged cursor, or the time runs out (at most a minute). Acknowledge
-before waiting: a wait from an old cursor returns at once.
+before waiting: a wait from an old cursor returns at once. A bucket has no one
+to wake the device: there, a wait looks again every five seconds
+(`Bucket::POLL`).
 
 ## Change the passphrase
 
@@ -301,5 +307,7 @@ command.
 
 - [A synced folder](/efema/guides/a-synced-folder/) - a complete app on top of
   the library, with merging.
+- [Without a server](/efema/guides/without-a-server/) - the same, through an
+  S3 bucket.
 - [Sealing](/efema/concepts/sealing/) - the keys and the formats.
 - [The API on docs.rs](https://docs.rs/efema) - every type and method.

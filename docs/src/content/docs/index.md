@@ -52,6 +52,15 @@ is something to read. Batches arrive whole and in one order for everyone,
 and a cursor that no longer matches the relay's history is refused, not
 silently read past.
 
+## Or no server at all
+
+An S3 bucket can stand where the relay stands: Amazon's, a MinIO of your own,
+or another service that speaks S3. The devices keep the stream in it
+themselves, in the same one order, under the same seal - every batch created
+in its place only if nothing is there yet, so two devices can never write one
+place twice. [Without a server](/efema/guides/without-a-server/) has how, and
+what changes against a relay.
+
 ## What it does not do
 
 - **It does not read your data.** Entries are opaque bytes: the relay stores
@@ -65,9 +74,10 @@ silently read past.
 
 ## Status
 
-0.6.0 is the relay and the Rust client library,
-[`efema`](https://docs.rs/efema), and a relay safe to leave reachable behind an
-HTTPS proxy: access keys to spaces, that read or that write; limits per key,
+0.7.0 is the relay and the Rust client library,
+[`efema`](https://docs.rs/efema), which syncs through a relay or through an S3
+bucket with nothing to run ([Without a server](/efema/guides/without-a-server/)),
+and a relay safe to leave reachable behind an HTTPS proxy: access keys to spaces, that read or that write; limits per key,
 announced and followed; plain HTTP from outside refused. It installs with one
 command and runs as a service on a Linux server
 ([On a server](/efema/guides/on-a-server/)). Every entry is compressed and

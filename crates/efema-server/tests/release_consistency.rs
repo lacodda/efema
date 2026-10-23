@@ -262,7 +262,7 @@ fn every_command_has_a_reference_page_and_every_page_a_command() {
         );
     }
     // The pages that are not about one command.
-    let overviews = ["commands", "protocol"];
+    let overviews = ["commands", "protocol", "bucket"];
     for entry in fs::read_dir(&reference).unwrap() {
         let path = entry.unwrap().path();
         let name = path.file_stem().unwrap().to_str().unwrap().to_string();

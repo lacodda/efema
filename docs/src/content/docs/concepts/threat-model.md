@@ -1,6 +1,6 @@
 ---
 title: Threat model
-description: What an efema relay can see and do, who can reach it, what it cannot, which of that is shown by tests, and what this version does not protect yet.
+description: What an efema relay - or the bucket a stream is kept in - can see and do, who can reach it, what it cannot, which of that is shown by tests, and what this version does not protect yet.
 ---
 
 A relay sits between your devices and holds everything they say to each other.
@@ -173,6 +173,33 @@ And accidents, mostly - the kind that happen to honest operators:
 - **A relay that hands out a broken history**: the client recomputes every
   link as it reads, and stops at the first one that does not follow.
 
+## In a bucket
+
+A stream kept in an S3 bucket ([Without a server](/efema/guides/without-a-server/))
+has no relay, and the bucket stands where the relay stood. Its owner - and the
+service that keeps it - sees what a relay's operator sees: stream names and
+identities in the keys, every batch's position, size and time, and the batch
+keys of the offers. Requests are signed and carry no secret: the credentials'
+secret never crosses the network. Entries are sealed as they are on a relay,
+so nothing kept in the bucket can be read without the stream's key, and the
+stream's key entries in it can be guessed at offline, like any copy of a
+relay's database.
+
+What the bucket's owner can do is what a dishonest relay can - withhold,
+delay, delete, show a device an older listing - and one thing more: write
+objects of their own into it. An object that is not a batch efema wrote is
+refused when it is read, a batch whose metadata says other than its body is
+not read, and an entry no client sealed does not open - but whoever can write
+to the bucket can fill it, or delete what is in it, as anyone who can write to
+a relay's disk can. Who that is, the bucket's own policies decide: there is no
+access key per device to revoke, only the service's credentials and their
+permissions. Credentials that only list and read are a device that only reads.
+
+A bucket that does not honour `If-None-Match` - that lets one object be
+created twice - would let two devices put two batches in one place. Before a
+client writes, it checks: it creates one object twice, and writes nothing to a
+bucket that lets the second creation through.
+
 ## What is shown, not claimed
 
 Each promise on this page is held by a test that runs on every change, against
@@ -203,8 +230,15 @@ a test that stays green with the property gone proves nothing.
 | What a device pushed outlives the network going and the app closing, and goes once both are back. | `what_waits_outlives_the_app_closing` ([crates/efema/tests/torn.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/torn.rs)) |
 | A push torn partway resumes where it stopped, and a torn read from the acknowledged cursor. | `a_long_push_resumes_where_it_stopped`, `a_pull_torn_partway_resumes_from_the_acknowledged_cursor` ([crates/efema/tests/torn.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/torn.rs)) |
 | A compressed frame that claims more than any item may be is refused before it is expanded. | `a_frame_that_lies_about_its_size_is_refused` ([crates/efema/src/envelope.rs](https://github.com/lacodda/efema/blob/main/crates/efema/src/envelope.rs)) |
+| Through a bucket, what crosses the network - and so all the bucket can keep - holds no item, passphrase or key in the clear, nor the credentials' secret. | `nothing_that_reaches_the_bucket_is_plaintext` ([crates/efema/tests/bucket.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/bucket.rs)) |
+| Writers at once, each with no memory of the others, put every batch in a bucket whole, on consecutive positions, in one order every reader reads; devices starting one stream at once start one. | `writers_at_once_land_whole_batches_in_one_order`, `devices_creating_one_stream_at_once_share_it` ([crates/efema/tests/bucket.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/bucket.rs)) |
+| A batch sent to a bucket again - after any of its answers was lost, from a device that remembers nothing, or from several places at once among other writers - lands once. | `whichever_answer_is_lost_a_batch_sent_again_lands_once`, `a_batch_sent_again_lands_once`, `a_batch_sent_from_several_places_at_once_lands_once` ([crates/efema/tests/bucket.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/bucket.rs)) |
+| A bucket that lets an object be created twice is not written to; one whose metadata says other than what it holds is not read; credentials that only read write nothing and keep nothing to send. | `a_bucket_that_lets_an_object_be_created_twice_is_not_written_to`, `a_bucket_that_says_one_thing_and_holds_another_is_not_believed`, `credentials_that_only_read_pull_and_keep_nothing_to_send` ([crates/efema/tests/bucket.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/bucket.rs)) |
 | The formats are the ones on the [Sealing](/efema/concepts/sealing/) page, frozen against bytes computed outside the code. | `the_formats_are_frozen` ([crates/lacodda-seal/src/lib.rs](https://github.com/lacodda/efema/blob/main/crates/lacodda-seal/src/lib.rs)), `the_sealing_page_gives_the_formats_the_code_writes` ([crates/efema/tests/sealing_page.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/sealing_page.rs)) |
 
+The bucket's tests run against a real S3 - MinIO, in CI on every change -
+never a mock of one; the one service they cannot have for real, one that
+ignores the condition, is a stand that answers every `PUT` with success.
 Connections in these tests are torn by a proxy between the client and the
 relay ([lacodda-tear](https://crates.io/crates/lacodda-tear)) - partway up a
 request, before or partway down an answer, or all at once - and the relay

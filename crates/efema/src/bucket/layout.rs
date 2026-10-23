@@ -256,6 +256,42 @@ mod tests {
         );
     }
 
+    /// The reference page is the contract for clients in other languages:
+    /// what it says the keys, the bodies and the metadata are must be what
+    /// this code writes.
+    #[test]
+    fn the_reference_page_describes_this_layout() {
+        let page = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/src/content/docs/reference/bucket.md"
+        ))
+        .expect("the reference page of the layout");
+        let says = |text: &str| assert!(page.contains(text), "the page does not say {text:?}");
+        says(&format!("`{PROBE}`"));
+        says(&format!("| 1 | `format` | uint | the layout: `{FORMAT}` |"));
+        says(&format!("Position 1 is\n`{}`", from_nines(1)));
+        says(&format!("position 10 is `{}`", from_nines(10)));
+        says("| `<stream>/stream` |");
+        says("| `<stream>/<id>/b/<first, from nines>` |");
+        says("| `<stream>/<id>/o/<batch key>/<first>` |");
+        for header in [LAST, EPOCH, LINK, KEY] {
+            says(&format!("| `{header}` |"));
+        }
+        assert_eq!(record(&stream()), "notes/stream");
+        assert_eq!(batch(&stream(), id(), 1), format!("notes/{}/b/99999999999999999998", id()));
+        let key = Hash::from_bytes([7; 32]);
+        assert_eq!(offer(&stream(), id(), &key, 5), format!("notes/{}/o/{key}/00000000000000000005", id()));
+        // The bodies' tables, key by key.
+        for row in [
+            "| 0 | `id` | identity |",
+            "| 0 | `first` | uint |",
+            "| 1 | `previous` | link |",
+            "| 2 | `batch` | [batch]",
+        ] {
+            says(row);
+        }
+    }
+
     // The layout is a contract between devices, like the wire format: an
     // object written by one release is read by every other. If this test
     // fails, the change is a new FORMAT, not a fix.

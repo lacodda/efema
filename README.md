@@ -89,6 +89,9 @@ SEQ  EPOCH      SIZE  HASH
   that is down, the app closing. A batch sent again after a lost answer lands
   once. A device's cursor moves only when the app says it applied what it
   read.
+- **Or no server at all.** An S3 bucket - Amazon's, a MinIO of your own, or
+  another service that speaks S3 - takes the relay's place: the devices keep
+  the stream there themselves, in the same one order, under the same seal.
 - **One `doctor`** for every app built on it.
 
 ## Install
@@ -116,8 +119,9 @@ $ cargo add efema
 ```
 
 Then [Getting started](https://lacodda.github.io/efema/getting-started/) for
-the relay, and [Syncing an app](https://lacodda.github.io/efema/guides/syncing-an-app/)
-for the client.
+the relay, [Syncing an app](https://lacodda.github.io/efema/guides/syncing-an-app/)
+for the client, and [Without a server](https://lacodda.github.io/efema/guides/without-a-server/)
+for a bucket in the relay's place.
 
 ## Documentation
 
@@ -127,9 +131,11 @@ The model, sealing, the threat model, every command and the protocol:
 
 ## Status
 
-0.6.0 is the relay and the Rust client library: safe to leave behind an HTTPS
-proxy, set up as a service with two commands, and through a torn, silent or
-slow network a push lands once. The wire format may still change before 1.0.
+0.7.0 is the relay and the Rust client library, which syncs through a relay
+or through an S3 bucket with nothing to run: the relay safe to leave behind an
+HTTPS proxy, set up as a service with two commands, and through a torn, silent
+or slow network a push lands once - in a bucket as on a relay. The wire format
+and the bucket's layout may still change before 1.0.
 Changes: [CHANGELOG](https://github.com/lacodda/efema/blob/main/CHANGELOG.md).
 
 ## Contributing
