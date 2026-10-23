@@ -19,7 +19,7 @@ On Windows, in PowerShell:
 ```
 
 Either puts `efema-server` from the latest release in your user's programs
-(`~/.local/bin`, `%LOCALAPPDATA%\Programs\efema`); `EFEMA_VERSION=v0.6.0` pins a
+(`~/.local/bin`, `%LOCALAPPDATA%\Programs\efema`); `EFEMA_VERSION=v0.7.0` pins a
 release and `EFEMA_INSTALL_DIR` picks the directory. With a Rust toolchain,
 `cargo install efema-server` builds it instead, and the archives are on the
 [latest release](https://github.com/lacodda/efema/releases/latest).
