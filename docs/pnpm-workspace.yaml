@@ -15,3 +15,8 @@ auditConfig:
     # own CSS at build time. The fix is in 7.x, which postcss-nested 6 does not
     # take - drop this line when expressive-code moves on.
     - GHSA-rj75-hqrm-r3gf
+
+# Before a script runs, pnpm holds node_modules to the lockfile and installs
+# what has fallen behind it: a gate run against older packages than the lock
+# names passes for something other than what ships.
+verifyDepsBeforeRun: install

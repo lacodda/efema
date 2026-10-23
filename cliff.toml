@@ -1,9 +1,12 @@
 # git-cliff configuration: https://git-cliff.org/docs/configuration
 #
-# The changelog is generated, never edited by hand:
-#   git cliff --tag vX.Y.Z --output CHANGELOG.md
+# The changelog is generated, never edited by hand. A release goes on top of
+# the ones before it:
+#   git cliff --unreleased --tag vX.Y.Z --prepend CHANGELOG.md
 
 [changelog]
+# The same text CHANGELOG.md starts with, byte for byte: `--prepend` knows it
+# as the header and keeps it on top, the new release under it.
 header = """
 # Changelog
 
@@ -20,6 +23,12 @@ across or a plain statement that there is none.
 `lacodda-seal` and `lacodda-tear` keep versions of their own (lacodda-seal
 0.1.0 since efema 0.2.0, lacodda-tear 0.1.0 since efema 0.4.0 and 0.1.1 since 0.6.0); their changes
 are listed under the efema release they shipped with.
+
+A release is added with:
+
+```console
+$ git cliff --unreleased --tag vX.Y.Z --prepend CHANGELOG.md
+```
 """
 body = """
 {% if version %}\
@@ -39,8 +48,10 @@ body = """
 {% for commit in commits %}
 - {{ commit.message | upper_first }}\
 {% endfor %}
-{% endfor %}\n
+{% endfor %}\
 """
+# Not trimmed, and the body ends on its last line: a release prepended lands
+# one blank line above the release before it.
 trim = false
 footer = ""
 
@@ -64,5 +75,7 @@ commit_parsers = [
   { message = "^test", group = "<!-- 5 -->Testing" },
   { message = "^build", group = "<!-- 6 -->Build" },
   { message = "^ci", group = "<!-- 7 -->CI" },
+  # `lyrn upgrade` commits the line's standard it brings as chore(standard).
+  { message = "^chore\\(standard\\)", group = "<!-- 8 -->Standard" },
   { message = "^chore", skip = true },
 ]

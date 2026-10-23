@@ -14,6 +14,12 @@ across or a plain statement that there is none.
 0.1.0 since efema 0.2.0, lacodda-tear 0.1.0 since efema 0.4.0 and 0.1.1 since 0.6.0); their changes
 are listed under the efema release they shipped with.
 
+A release is added with:
+
+```console
+$ git cliff --unreleased --tag vX.Y.Z --prepend CHANGELOG.md
+```
+
 ## [0.6.0] - 2026-10-19
 
 ### Features
