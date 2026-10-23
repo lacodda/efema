@@ -46,8 +46,8 @@ relay too.
 
 ```console
 $ efema-server serve
-2026-10-19T14:39:09.749461Z  INFO efema-server 0.6.0 listening on http://127.0.0.1:2451, data in /home/you/.local/share/efema
-2026-10-19T14:39:09.750273Z  INFO answering this machine and HTTPS forwarded by 127.0.0.0/8, ::1/128; batches up to 16777216 bytes, entries up to 8388608, 8589934592 bytes a space, 600 requests a minute a key
+2026-10-23T17:36:12.936616Z  INFO efema-server 0.7.0 listening on http://127.0.0.1:2451, data in /home/you/.local/share/efema
+2026-10-23T17:36:12.936914Z  INFO answering this machine and HTTPS forwarded by 127.0.0.0/8, ::1/128; batches up to 16777216 bytes, entries up to 8388608, 8589934592 bytes a space, 600 requests a minute a key
 ```
 
 The relay listens on the loopback interface, port 2451, and keeps its data in

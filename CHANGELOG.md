@@ -20,6 +20,42 @@ A release is added with:
 $ git cliff --unreleased --tag vX.Y.Z --prepend CHANGELOG.md
 ```
 
+## [0.7.0] - 2026-10-23
+
+### Features
+
+- Sync through an S3 bucket, with no server of one's own
+- Sync a folder through an S3 bucket, and time the first sync there
+
+### Bug Fixes
+
+- Look for a batch sent again after the head, every round
+- Take ctutils, rustls-webpki and webpki-root-certs past three advisories
+
+### Refactoring
+
+- Let the metadata check say where a batch starts
+
+### Documentation
+
+- Show the server install and upgrade as the stand printed them
+- Keep a stream in a bucket by creating only what is not there
+- Sync without a server, through an S3 bucket
+- Say the status in three lines
+
+### Testing
+
+- Race the creation of a stream, and tamper with what a bucket says
+- Credentials that only read pull and keep nothing to send
+
+### CI
+
+- Test the bucket against MinIO, and time the first sync through it
+
+### Standard
+
+- Take the line's standard 2026.11
+
 ## [0.6.0] - 2026-10-19
 
 ### Features
