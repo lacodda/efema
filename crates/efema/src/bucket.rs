@@ -493,9 +493,11 @@ impl Bucket {
         };
         let stored: Stored =
             wire::decode(&answer.body).map_err(|e| self.not_protocol(format!("{key} is not a batch: {e}")))?;
-        if stored.first != first || stored.batch.entries.is_empty() {
-            return Err(self.not_protocol(format!("{key} holds a batch that does not start there")));
+        if stored.batch.entries.is_empty() {
+            return Err(self.not_protocol(format!("{key} holds a batch of nothing")));
         }
+        // Its own summary - where it starts, ends, links to, what it is -
+        // and the one its metadata gives everyone who only looks at that.
         let summary = stored.summary();
         if Summary::from_headers(first, |name| answer.header(name)) != Some(summary) {
             return Err(self.not_protocol(format!("{key} says one thing in its metadata and holds another")));
