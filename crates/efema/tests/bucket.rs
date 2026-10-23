@@ -91,6 +91,7 @@ async fn everything(at: &Settings, stream: &StreamName, page: usize) -> Vec<Entr
     let mut after: Option<Cursor> = None;
     loop {
         let read = at.bucket().read(stream, after.as_ref(), page).await.unwrap();
+        assert!(read.entries.len() <= page, "a page of {} entries, asked for {page}", read.entries.len());
         let mut previous = after.unwrap_or_else(|| Cursor::start(read.stream));
         for entry in &read.entries {
             assert_eq!(entry.seq, previous.seq + 1, "a gap before {}", entry.seq);
@@ -191,6 +192,24 @@ async fn writers_at_once_land_whole_batches_in_one_order() {
     }
     // A second reader, with pages of another length, reads the same.
     assert_eq!(everything(&at, &stream, 1000).await, all);
+}
+
+/// Devices that start one stream at the same moment start one stream: the
+/// record is created once, and every device writes into it.
+#[tokio::test(flavor = "multi_thread")]
+async fn devices_creating_one_stream_at_once_share_it() {
+    let Some(at) = Settings::from_env() else { return };
+    for _ in 0..5 {
+        let stream = at.fresh("created");
+        let (one, other) = (at.bucket(), at.bucket());
+        let (first, second) = (batch(&[b"from one"], None), batch(&[b"from the other"], None));
+        let (a, b) = tokio::join!(one.append(&stream, &first), other.append(&stream, &second));
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert_eq!(a.stream, b.stream, "two incarnations of one name");
+        let mut read = texts(&everything(&at, &stream, 100).await);
+        read.sort();
+        assert_eq!(read, ["from one", "from the other"]);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -390,7 +409,7 @@ async fn a_wait_wakes_for_a_write_and_ends_without_one() {
 #[tokio::test(flavor = "multi_thread")]
 async fn nothing_that_reaches_the_bucket_is_plaintext() {
     let Some(at) = Settings::from_env() else { return };
-    let recorder = Recorder::start(at.upstream()).await;
+    let recorder = Proxy::start(at.upstream(), None).await;
     let stream = at.fresh("sealed");
     let (laptop, phone) = (Device::new(), Device::new());
     let marker = b"PLAINTEXT-MARKER-the-bucket-must-never-see";
@@ -416,6 +435,23 @@ async fn nothing_that_reaches_the_bucket_is_plaintext() {
     ] {
         assert!(!contains(&traffic, secret), "{what} crossed to the bucket");
     }
+}
+
+/// A batch whose object says in its metadata one thing and holds another -
+/// a writer with a bug, a service that lost a header - is not read as
+/// either.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bucket_that_says_one_thing_and_holds_another_is_not_believed() {
+    let Some(at) = Settings::from_env() else { return };
+    let stream = at.fresh("tampered");
+    at.bucket().append(&stream, &batch(&[b"a", b"b"], None)).await.unwrap();
+    let lying = Proxy::start(at.upstream(), Some((b"x-amz-meta-efema-last: 2\r", b"x-amz-meta-efema-last: 3\r"))).await;
+    let read = at.through(lying.addr).read(&stream, None, 100).await;
+    assert!(
+        matches!(&read, Err(efema::TransportError::NotProtocol { reason, .. }) if reason.contains("metadata")),
+        "{read:?}"
+    );
+    assert!(lying.swapped(), "the proxy changed nothing");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -459,38 +495,62 @@ async fn a_bucket_that_lets_an_object_be_created_twice_is_not_written_to() {
     assert!(!puts.is_empty() && puts.iter().all(|path| path == "/lying/.efema-probe"), "{puts:?}");
 }
 
-/// A proxy on this machine that keeps every byte it passes, both ways.
-struct Recorder {
+/// A proxy on this machine that keeps every byte it passes, both ways - and,
+/// given a pair, swaps the first for the second in what comes back.
+struct Proxy {
     addr: SocketAddr,
     bytes: Arc<Mutex<Vec<u8>>>,
+    swaps: Arc<Mutex<usize>>,
 }
 
-impl Recorder {
-    async fn start(upstream: SocketAddr) -> Self {
+type Swap = (&'static [u8], &'static [u8]);
+
+impl Proxy {
+    async fn start(upstream: SocketAddr, swap: Option<Swap>) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let bytes = Arc::new(Mutex::new(Vec::new()));
-        let kept = bytes.clone();
+        let (bytes, swaps) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(0)));
+        let (kept, swapped) = (bytes.clone(), swaps.clone());
         tokio::spawn(async move {
             while let Ok((client, _)) = listener.accept().await {
                 let server = tokio::net::TcpStream::connect(upstream).await.unwrap();
                 let (client_read, client_write) = client.into_split();
                 let (server_read, server_write) = server.into_split();
-                tokio::spawn(pass(client_read, server_write, kept.clone()));
-                tokio::spawn(pass(server_read, client_write, kept.clone()));
+                tokio::spawn(pass(client_read, server_write, kept.clone(), None, swapped.clone()));
+                tokio::spawn(pass(server_read, client_write, kept.clone(), swap, swapped.clone()));
             }
         });
-        Self { addr, bytes }
+        Self { addr, bytes, swaps }
+    }
+
+    fn swapped(&self) -> bool {
+        *self.swaps.lock().unwrap() > 0
     }
 }
 
-async fn pass(mut from: impl AsyncReadExt + Unpin, mut to: impl AsyncWriteExt + Unpin, kept: Arc<Mutex<Vec<u8>>>) {
+async fn pass(
+    mut from: impl AsyncReadExt + Unpin,
+    mut to: impl AsyncWriteExt + Unpin,
+    kept: Arc<Mutex<Vec<u8>>>,
+    swap: Option<Swap>,
+    swaps: Arc<Mutex<usize>>,
+) {
     let mut buffer = vec![0; 64 * 1024];
     while let Ok(read) = from.read(&mut buffer).await {
-        if read == 0 || to.write_all(&buffer[..read]).await.is_err() {
+        if read == 0 {
             break;
         }
-        kept.lock().unwrap().extend_from_slice(&buffer[..read]);
+        let mut piece = buffer[..read].to_vec();
+        if let Some((this, that)) = swap
+            && let Some(at) = piece.windows(this.len()).position(|window| window.eq_ignore_ascii_case(this))
+        {
+            piece.splice(at..at + this.len(), that.iter().copied());
+            *swaps.lock().unwrap() += 1;
+        }
+        if to.write_all(&piece).await.is_err() {
+            break;
+        }
+        kept.lock().unwrap().extend_from_slice(&piece);
     }
     let _ = to.shutdown().await;
 }
