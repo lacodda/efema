@@ -85,6 +85,7 @@
 //! write ([`Error::EpochBehind`]) - instead of misreading the newer format or
 //! mixing the older one in.
 
+mod bucket;
 mod client;
 mod doctor;
 mod envelope;
@@ -94,6 +95,7 @@ mod stall;
 mod state;
 mod transport;
 
+pub use bucket::{Bucket, Credentials};
 pub use client::{Client, Pulled, Received, Secret, Sent};
 pub use doctor::{KeyReport, QUEUE_STALE, RelayReport, Report};
 pub use efema_proto::wire::Limits;

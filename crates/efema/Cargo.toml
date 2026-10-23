@@ -23,11 +23,16 @@ http-body.workspace = true
 minicbor.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true
+# HMAC-SHA256 for signing requests to a bucket (Signature Version 4).
+sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 zstd.workspace = true
 
 [dev-dependencies]
+# A service that answers like S3 and does not honour a condition - the one
+# bucket that cannot be had for real.
+axum.workspace = true
 # Tests talk to a real relay. Published before this crate (publish.yml), so
 # the version this names is on crates.io when the client goes up.
 efema-server.workspace = true

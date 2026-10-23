@@ -11,8 +11,8 @@ use reqwest::{RequestBuilder, StatusCode, Url};
 use crate::stall::{Pulse, STALL, Upload};
 use crate::transport::{Transport, TransportError};
 
-/// How long reaching the relay may take.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long reaching the relay - or a bucket - may take.
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// An efema relay, reached over HTTPS - or over plain HTTP on this machine -
 /// with an access key that opens one of its spaces.
@@ -47,12 +47,42 @@ pub struct Relay {
     authorization: HeaderValue,
 }
 
-/// Why a text is not the address of a relay.
+/// Why a text is not the address of a relay or a bucket.
 #[derive(Debug, thiserror::Error)]
-#[error("`{url}` is not a relay address: {reason}")]
+#[error("`{url}` is not {what}: {reason}")]
 pub struct InvalidUrl {
     url: String,
+    what: &'static str,
     reason: String,
+}
+
+impl InvalidUrl {
+    pub(crate) fn new(url: &str, what: &'static str, reason: &str) -> Self {
+        Self { url: url.to_string(), what, reason: reason.to_string() }
+    }
+}
+
+/// `url` checked as an address a request with a credential on it may go to:
+/// `https://`, or `http://` to this machine, with a host and no query or
+/// fragment. `what` names it in the error.
+pub(crate) fn address(url: &str, what: &'static str) -> Result<Url, InvalidUrl> {
+    let invalid = |reason: &str| InvalidUrl::new(url, what, reason);
+    let parsed = Url::parse(url).map_err(|e| invalid(&e.to_string()))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(invalid("the scheme must be http or https"));
+    }
+    if parsed.host().is_none() {
+        return Err(invalid("there is no host"));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(invalid("the address has no query and no fragment"));
+    }
+    if parsed.scheme() == "http" && !on_this_machine(&parsed) {
+        return Err(invalid(
+            "plain http goes only to this machine (localhost, 127.0.0.1, ::1): to another, the credentials would cross the network in the clear - use https",
+        ));
+    }
+    Ok(parsed)
 }
 
 impl Relay {
@@ -65,27 +95,13 @@ impl Relay {
     /// [`InvalidUrl`] when `url` is not an HTTP address, or is plain HTTP to
     /// another machine.
     pub fn new(url: &str, key: AccessKey) -> Result<Self, InvalidUrl> {
-        let invalid = |reason: &str| InvalidUrl { url: url.to_string(), reason: reason.to_string() };
-        let parsed = Url::parse(url).map_err(|e| invalid(&e.to_string()))?;
-        if !matches!(parsed.scheme(), "http" | "https") {
-            return Err(invalid("the scheme must be http or https"));
-        }
-        if parsed.host().is_none() {
-            return Err(invalid("there is no host"));
-        }
-        if parsed.query().is_some() || parsed.fragment().is_some() {
-            return Err(invalid("a relay address has no query and no fragment"));
-        }
-        if parsed.scheme() == "http" && !on_this_machine(&parsed) {
-            return Err(invalid(
-                "plain http goes only to this machine (localhost, 127.0.0.1, ::1): to another, the access key would cross the network in the clear - use https",
-            ));
-        }
+        const WHAT: &str = "a relay address";
+        let parsed = address(url, WHAT)?;
         let http = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .user_agent(concat!("efema/", env!("CARGO_PKG_VERSION")))
             .build()
-            .map_err(|e| invalid(&e.to_string()))?;
+            .map_err(|e| InvalidUrl::new(url, WHAT, &e.to_string()))?;
         let mut authorization =
             HeaderValue::from_str(&format!("Bearer {}", key.expose())).expect("an access key is printable ASCII");
         authorization.set_sensitive(true);

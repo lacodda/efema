@@ -183,6 +183,10 @@ impl fmt::Display for Report {
             Err(_) => "unknown".to_string(),
         };
         let access = match &self.access {
+            // A bucket: no quota, and nothing counted.
+            Ok(access) if access.quota == u64::MAX => {
+                format!("{} - no quota", if access.write { "reads and writes" } else { "reads only" })
+            }
             Ok(access) => format!(
                 "{} - {} of {} in the space",
                 if access.write { "reads and writes" } else { "reads only" },
