@@ -14,9 +14,11 @@
 //! 5080 files sized the way the notes and attachments of a real vault are -
 //! half under 4 KB, one in a hundred over 240 KB, the largest a few MB - notes
 //! as text, the largest files as bytes that do not compress. Without
-//! `--relay`, it starts a relay of its own in a temporary folder. With
-//! `--relay`, the access key comes from `FIRST_SYNC_KEY`, and each run writes
-//! a new stream with a name of its own.
+//! `--relay` or `--bucket`, it starts a relay of its own in a temporary
+//! folder. With `--relay`, the access key comes from `FIRST_SYNC_KEY`; with
+//! `--bucket`, the bucket's credentials from `AWS_ACCESS_KEY_ID` and
+//! `AWS_SECRET_ACCESS_KEY`, its region from `AWS_REGION`. Each run writes a
+//! new stream with a name of its own.
 //!
 //! Each run seals with a passphrase of its own, random and never shown: what
 //! it leaves on a relay can be opened by no one.
@@ -28,7 +30,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use efema::{AccessKey, Client, Epoch, Relay, Secret, State, StreamName};
+use efema::{AccessKey, Bucket, Client, Credentials, Epoch, Relay, Secret, State, StreamName, Transport};
+use mini_vault::Summary;
 use mini_vault::{Vault, scan};
 
 /// Time the first sync of a vault: up to an empty relay, then down to a
@@ -46,11 +49,17 @@ struct Cli {
     #[arg(long, conflicts_with_all = ["files", "seed"])]
     folder: Option<PathBuf>,
     /// A relay to sync through, instead of one started for the run.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "bucket")]
     relay: Option<String>,
     /// The access key to `--relay`.
     #[arg(long, env = "FIRST_SYNC_KEY", hide_env_values = true)]
     key: Option<AccessKey>,
+    /// An S3 bucket to sync through, instead of a relay: its address.
+    #[arg(long)]
+    bucket: Option<String>,
+    /// The bucket's region.
+    #[arg(long, env = "AWS_REGION")]
+    region: Option<String>,
     /// Fail when the way up - the whole vault to the empty relay - takes
     /// longer than this many seconds.
     #[arg(long)]
@@ -86,46 +95,29 @@ async fn run(cli: Cli) -> Result<bool> {
     let source = cli.folder.as_ref().map_or_else(|| format!("made up, seed {}", cli.seed), |f| f.display().to_string());
     println!("vault  {count} files, {} ({source})", size(bytes));
 
-    let local;
-    let (url, key) = match (cli.relay, cli.key) {
-        (Some(url), Some(key)) => (url, key),
-        (Some(_), None) => bail!("--relay needs an access key: FIRST_SYNC_KEY or --key"),
-        (None, _) => {
-            local = LocalRelay::start(&work.path().join("relay")).await?;
-            (local.url.clone(), local.key.clone())
-        }
-    };
     let stream: StreamName = format!("first-sync-{}", hex(&random::<4>())).parse()?;
     let passphrase = hex(&random::<32>());
-    println!("relay  {url}, stream {stream}");
-
-    // Up: the first device, from its own folder to the empty stream.
-    let started = Instant::now();
-    let up_state = State::open(work.path().join("up.sqlite3"))?;
-    let relay = Relay::new(&url, key.clone())?;
-    let client =
-        Client::open(relay, &up_state, stream.clone(), EPOCH, Secret::Passphrase(passphrase.as_bytes())).await?;
-    let opened = started.elapsed();
-    let mut up = Vault::open(client, &folder, &work.path().join("up-index"))?;
-    let summary = up.sync().await?;
-    let up_took = started.elapsed();
-    println!("up     {} files in {} - the stream's key made in {}", summary.pushed, secs(up_took), secs(opened));
-    for file in &summary.too_large {
-        println!("       not sent: {file}");
-    }
-
-    // Down: a second device, from the stream to an empty folder.
-    let started = Instant::now();
-    let down_state = State::open(work.path().join("down.sqlite3"))?;
-    let relay = Relay::new(&url, key)?;
-    let client = Client::open(relay, &down_state, stream, EPOCH, Secret::Passphrase(passphrase.as_bytes())).await?;
-    let opened = started.elapsed();
-    let down_folder = work.path().join("down");
-    fs::create_dir_all(&down_folder)?;
-    let mut down = Vault::open(client, &down_folder, &work.path().join("down-index"))?;
-    let summary_down = down.sync().await?;
-    let down_took = started.elapsed();
-    println!("down   {} files in {} - the key unlocked in {}", summary_down.applied, secs(down_took), secs(opened));
+    let local;
+    let (up_took, summary, down_folder) = match (cli.relay, cli.bucket) {
+        (Some(url), None) => {
+            let key = cli.key.context("--relay needs an access key: FIRST_SYNC_KEY or --key")?;
+            println!("relay  {url}, stream {stream}");
+            both_ways(|| Ok(Relay::new(&url, key.clone())?), work.path(), &folder, &stream, &passphrase).await?
+        }
+        (None, Some(url)) => {
+            let region = cli.region.context("--bucket needs its region: AWS_REGION or --region")?;
+            let credentials = credentials()?;
+            println!("bucket {url}, stream {stream}");
+            let bucket = || Ok(Bucket::new(&url, &region, credentials.clone())?);
+            both_ways(bucket, work.path(), &folder, &stream, &passphrase).await?
+        }
+        _ => {
+            local = LocalRelay::start(&work.path().join("relay")).await?;
+            println!("relay  {}, stream {stream}", local.url);
+            let relay = || Ok(Relay::new(&local.url, local.key.clone())?);
+            both_ways(relay, work.path(), &folder, &stream, &passphrase).await?
+        }
+    };
 
     let mut expected = scan(&folder)?;
     for file in &summary.too_large {
@@ -142,6 +134,53 @@ async fn run(cli: Cli) -> Result<bool> {
     let within = up_took.as_secs_f64() <= limit;
     println!("limit  {limit} s up: {}", if within { "within" } else { "OVER" });
     Ok(within)
+}
+
+/// The first sync through what `transport` makes: up from `folder` to the
+/// empty `stream`, then down to a second device's empty folder - how long
+/// the way up took, what it sent, and where the way down landed.
+async fn both_ways<T: Transport>(
+    transport: impl Fn() -> Result<T>,
+    work: &Path,
+    folder: &Path,
+    stream: &StreamName,
+    passphrase: &str,
+) -> Result<(Duration, Summary, PathBuf)> {
+    // Up: the first device, from its own folder to the empty stream.
+    let started = Instant::now();
+    let up_state = State::open(work.join("up.sqlite3"))?;
+    let client =
+        Client::open(transport()?, &up_state, stream.clone(), EPOCH, Secret::Passphrase(passphrase.as_bytes())).await?;
+    let opened = started.elapsed();
+    let mut up = Vault::open(client, folder, &work.join("up-index"))?;
+    let summary = up.sync().await?;
+    let up_took = started.elapsed();
+    println!("up     {} files in {} - the stream's key made in {}", summary.pushed, secs(up_took), secs(opened));
+    for file in &summary.too_large {
+        println!("       not sent: {file}");
+    }
+
+    // Down: a second device, from the stream to an empty folder.
+    let started = Instant::now();
+    let down_state = State::open(work.join("down.sqlite3"))?;
+    let client =
+        Client::open(transport()?, &down_state, stream.clone(), EPOCH, Secret::Passphrase(passphrase.as_bytes()))
+            .await?;
+    let opened = started.elapsed();
+    let down_folder = work.join("down");
+    fs::create_dir_all(&down_folder)?;
+    let mut down = Vault::open(client, &down_folder, &work.join("down-index"))?;
+    let summary_down = down.sync().await?;
+    let down_took = started.elapsed();
+    println!("down   {} files in {} - the key unlocked in {}", summary_down.applied, secs(down_took), secs(opened));
+    Ok((up_took, summary, down_folder))
+}
+
+/// A bucket's credentials, from the variables every S3 tool reads.
+fn credentials() -> Result<Credentials> {
+    let id = std::env::var("AWS_ACCESS_KEY_ID").context("--bucket needs AWS_ACCESS_KEY_ID")?;
+    let secret = std::env::var("AWS_SECRET_ACCESS_KEY").context("--bucket needs AWS_SECRET_ACCESS_KEY")?;
+    Ok(Credentials::new(id, secret))
 }
 
 /// A relay of the run's own, on this machine, in `dir`.
