@@ -4,7 +4,9 @@
 //! The bucket comes from the environment - `EFEMA_TEST_BUCKET` (its address,
 //! `http://127.0.0.1:9000/efema-test`), `EFEMA_TEST_BUCKET_REGION`
 //! (`us-east-1` if unset), `EFEMA_TEST_BUCKET_KEY` and
-//! `EFEMA_TEST_BUCKET_SECRET`. Without it these tests say they are skipped
+//! `EFEMA_TEST_BUCKET_SECRET`, and credentials to the same bucket that only
+//! read it - `EFEMA_TEST_BUCKET_READER_KEY` and
+//! `EFEMA_TEST_BUCKET_READER_SECRET`. Without it these tests say they are skipped
 //! and pass; with `EFEMA_TEST_BUCKET_REQUIRED` set they fail instead, so the
 //! CI job that runs them against MinIO cannot go green without a bucket.
 //! Every test writes streams of its own, under fresh names.
@@ -28,6 +30,7 @@ struct Settings {
     region: String,
     id: String,
     secret: String,
+    reader: (String, String),
 }
 
 impl Settings {
@@ -46,6 +49,7 @@ impl Settings {
             region: std::env::var("EFEMA_TEST_BUCKET_REGION").unwrap_or_else(|_| "us-east-1".into()),
             id: var("EFEMA_TEST_BUCKET_KEY"),
             secret: var("EFEMA_TEST_BUCKET_SECRET"),
+            reader: (var("EFEMA_TEST_BUCKET_READER_KEY"), var("EFEMA_TEST_BUCKET_READER_SECRET")),
         })
     }
 
@@ -56,6 +60,11 @@ impl Settings {
     /// The bucket, as a device that has not talked to it before reaches it.
     fn bucket(&self) -> Bucket {
         Bucket::new(self.url.as_str(), &self.region, self.credentials()).unwrap()
+    }
+
+    /// The bucket, with credentials that only read it.
+    fn for_reading(&self) -> Bucket {
+        Bucket::new(self.url.as_str(), &self.region, Credentials::new(&self.reader.0, &self.reader.1)).unwrap()
     }
 
     /// The bucket, reached through `proxy` on this machine.
@@ -492,6 +501,32 @@ async fn a_bucket_that_says_one_thing_and_holds_another_is_not_believed() {
         "{read:?}"
     );
     assert!(lying.swapped(), "the proxy changed nothing");
+}
+
+/// Credentials the bucket lets read and not write: the device reads the
+/// stream, and nothing it pushes is kept to be sent - nor can it start a
+/// stream.
+#[tokio::test(flavor = "multi_thread")]
+async fn credentials_that_only_read_pull_and_keep_nothing_to_send() {
+    let Some(at) = Settings::from_env() else { return };
+    let stream = at.fresh("reader");
+    let on_laptop = Device::new().open(at.bucket(), stream.as_str(), 1).await;
+    on_laptop.push([b"for everyone".as_slice()]).await.unwrap();
+
+    assert!(!at.for_reading().limits().await.unwrap().write);
+    let phone = Device::new();
+    let on_phone = phone.open(at.for_reading(), stream.as_str(), 1).await;
+    assert_eq!(data(&drain(&on_phone).await), [b"for everyone".as_slice()]);
+    let refused = on_phone.push([b"from the phone".as_slice()]).await;
+    assert!(matches!(refused, Err(Error::ReadOnly { .. })), "{refused:?}");
+    assert!(on_phone.queue().await.unwrap().is_empty());
+    let (code, _) = refusal(at.for_reading().append(&stream, &batch(&[b"x"], None)).await);
+    assert_eq!(code, ProblemCode::Forbidden);
+
+    let refused =
+        phone.try_open(at.for_reading(), at.fresh("unborn").as_str(), 1, Secret::Passphrase(PASSPHRASE)).await;
+    assert!(matches!(refused, Err(Error::ReadOnly { .. })), "{refused:?}");
+    assert_eq!(everything(&at, &stream, 100).await.len(), 2, "the key entry and one item");
 }
 
 #[tokio::test(flavor = "multi_thread")]
