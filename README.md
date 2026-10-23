@@ -131,11 +131,9 @@ The model, sealing, the threat model, every command and the protocol:
 
 ## Status
 
-0.7.0 is the relay and the Rust client library, which syncs through a relay
-or through an S3 bucket with nothing to run: the relay safe to leave behind an
-HTTPS proxy, set up as a service with two commands, and through a torn, silent
-or slow network a push lands once - in a bucket as on a relay. The wire format
-and the bucket's layout may still change before 1.0.
+0.7.0 is the relay and the Rust client, which syncs through a relay or an S3
+bucket with nothing to run; through a torn, silent or slow network a push
+lands once. The wire format and the bucket's layout may change before 1.0.
 Changes: [CHANGELOG](https://github.com/lacodda/efema/blob/main/CHANGELOG.md).
 
 ## Contributing
