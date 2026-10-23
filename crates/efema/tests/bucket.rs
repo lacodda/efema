@@ -244,6 +244,46 @@ async fn a_batch_sent_again_lands_once() {
     assert_eq!(texts(&everything(&at, &stream, 100).await), ["one", "two", "three", "four"]);
 }
 
+/// One batch sent from several places at once - a send given up on as
+/// stalled while its request still went through, and sent again - among
+/// other writers: it lands once, and every sending is told where.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_batch_sent_from_several_places_at_once_lands_once() {
+    let Some(at) = Settings::from_env() else { return };
+    let at = Arc::new(at);
+    let stream = at.fresh("twins");
+    let id = at.bucket().append(&stream, &batch(&[b"start"], None)).await.unwrap().stream;
+    const TWINS: usize = 6;
+    const OTHERS: usize = 3;
+    for round in 0..8 {
+        let twin = format!("twin {round}");
+        let barrier = Arc::new(Barrier::new(TWINS + OTHERS));
+        let mut tasks = Vec::new();
+        for task in 0..TWINS + OTHERS {
+            let (at, stream, barrier) = (at.clone(), stream.clone(), barrier.clone());
+            let entry = if task < TWINS { twin.clone() } else { format!("other {round} {task}") };
+            tasks.push(tokio::spawn(async move {
+                let bucket = at.bucket();
+                barrier.wait().await;
+                let written = bucket.append(&stream, &batch(&[entry.as_bytes()], Some(id))).await.unwrap();
+                (task < TWINS, written)
+            }));
+        }
+        let mut twins = Vec::new();
+        for task in tasks {
+            let (is_twin, written) = task.await.unwrap();
+            if is_twin {
+                twins.push(written);
+            }
+        }
+        assert_eq!(twins.iter().filter(|w| !w.repeated).count(), 1, "round {round}: {twins:?}");
+        assert!(twins.iter().all(|w| (w.first, w.last) == (twins[0].first, twins[0].last)), "round {round}: {twins:?}");
+        let read = texts(&everything(&at, &stream, 1000).await);
+        assert_eq!(read.iter().filter(|text| **text == twin).count(), 1, "round {round}: {read:?}");
+        assert_eq!(read[twins[0].first as usize - 1], twin);
+    }
+}
+
 /// Whichever answer of an append the network loses - the record, the
 /// listings, the offer, the batch itself - sending the batch again writes it
 /// once, and the stream goes on without a gap. And whichever request it

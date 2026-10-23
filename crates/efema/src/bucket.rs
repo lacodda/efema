@@ -569,12 +569,6 @@ impl Bucket {
         Ok(None)
     }
 
-    /// The answer to a batch the stream has already.
-    async fn repeated(&self, stream: &StreamName, id: StreamId, landed: Summary) -> Result<Written, TransportError> {
-        let epoch = self.newest(stream, id).await?.map_or(landed.epoch, |newest| newest.epoch.max(landed.epoch));
-        Ok(Written { stream: id, epoch, first: landed.first, last: landed.last, repeated: true })
-    }
-
     /// How a watched stream stands now. Looked at before: the next place
     /// only - a `HEAD` - unless something is there.
     async fn look(&self, stream: &StreamName, before: Option<Seen>) -> Result<Seen, TransportError> {
@@ -647,12 +641,9 @@ impl Transport for Bucket {
             }
             (None, None) => self.create_record(stream).await?,
         };
-        // Before everything else, as on a relay: a batch the stream has is
-        // answered, whatever changed since it was written.
-        let key = batch.key();
-        if let Some(landed) = self.landed(stream, id, &key).await? {
-            return self.repeated(stream, id, landed).await;
-        }
+        // What a bucket takes never changes, so a batch it would refuse now
+        // it refused when first sent: unlike on a relay, the size can be
+        // looked at before the stream is.
         let size = wire::encode(batch).len() as u64;
         if size > LIMITS.body {
             let mut refusal = problem(
@@ -675,6 +666,7 @@ impl Transport for Bucket {
             return Err(TransportError::Refused { at: self.base(), problem: Box::new(refusal) });
         }
 
+        let key = batch.key();
         let mut stored = Stored {
             first: 0,
             previous: chain::genesis(&id),
@@ -682,6 +674,15 @@ impl Transport for Bucket {
         };
         let mut newest = self.newest(stream, id).await?;
         for _ in 0..PLACES {
+            // A batch the stream has is answered, before the epoch is looked
+            // at - and looked for after the head, every time: a batch at or
+            // below the head seen was put after its offer, so the offer is
+            // there to be found. Looked for first, a sending of the same batch
+            // from elsewhere could land in between, and this one after it.
+            if let Some(landed) = self.landed(stream, id, &key).await? {
+                let epoch = newest.map_or(landed.epoch, |newest| newest.epoch.max(landed.epoch));
+                return Ok(Written { stream: id, epoch, first: landed.first, last: landed.last, repeated: true });
+            }
             let (after, epoch, previous) =
                 newest.map_or((0, Epoch(0), chain::genesis(&id)), |n| (n.last, n.epoch, n.link));
             if batch.epoch < epoch {
@@ -709,19 +710,17 @@ impl Transport for Bucket {
                         repeated: false,
                     });
                 }
+                // Another batch has the place - or this one, sent from
+                // elsewhere, which the next round finds by its offer. The
+                // stream went on at least to the place lost.
                 Created::Taken => {
-                    let taken = self
-                        .summary(stream, id, stored.first)
-                        .await?
-                        .ok_or_else(|| self.not_protocol(format!("{place} was taken, and is not there")))?;
-                    if taken.key == key {
-                        return self.repeated(stream, id, taken).await;
-                    }
-                    // Someone else's batch: the stream went on, and so does
-                    // this one, after wherever it is now.
                     newest = match self.newest(stream, id).await? {
-                        Some(now) if now.last > taken.last => Some(now),
-                        _ => Some(taken),
+                        Some(now) if now.last >= stored.first => Some(now),
+                        _ => Some(
+                            self.summary(stream, id, stored.first)
+                                .await?
+                                .ok_or_else(|| self.not_protocol(format!("{place} was taken, and is not there")))?,
+                        ),
                     };
                 }
             }
