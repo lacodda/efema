@@ -1,20 +1,8 @@
 # Changelog
 
-All notable changes to efema are documented here, generated from the commit
-history by [git-cliff](https://git-cliff.org).
-
-The protocol, the relay's database and the client's state file are versioned
-on their own: the wire format is protocol version 1 (paths under `/v1`), and
-each database carries a schema version checked before reading. Any change that
-breaks one of them - or the cursor's hash chain, or the sealing formats every
-stream is written in - gets a "Breaking Changes" section here, with the way
-across or a plain statement that there is none.
-
-`lacodda-seal` and `lacodda-tear` keep versions of their own (lacodda-seal
-0.1.0 since efema 0.2.0, lacodda-tear 0.1.0 since efema 0.4.0 and 0.1.1 since 0.6.0); their changes
-are listed under the efema release they shipped with.
-
-A release is added with:
+All notable changes to this project are documented here. The file is
+written by [git-cliff](https://git-cliff.org) from the commits since the
+last release, which follow [Conventional Commits](https://www.conventionalcommits.org):
 
 ```console
 $ git cliff --unreleased --tag vX.Y.Z --prepend CHANGELOG.md
