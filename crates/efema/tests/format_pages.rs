@@ -1,9 +1,9 @@
-//! Holds the sealing page of the documentation site to the code.
+//! Holds the pages another implementation is written from - Sealing, Format,
+//! and the threat model's list of proofs - to the code.
 //!
-//! The page is the specification another implementation is written from: it
-//! gives every domain string, length and default the client and its sealing
-//! crate use. Nothing fails when the two drift - until a client in another
-//! language cannot open what this one sealed.
+//! The pages give every domain string, length, default and version the client
+//! and its sealing crate use. Nothing fails when the two drift - until a
+//! client in another language cannot open what this one sealed.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -68,6 +68,33 @@ fn the_sealing_page_gives_the_formats_the_code_writes() {
         default.parallelism()
     );
     assert!(page.contains(&stated), "the sealing page does not give the default Argon2id parameters as {stated}");
+}
+
+#[test]
+fn the_format_page_gives_each_part_at_the_version_the_code_reads() {
+    let page = read("docs/src/content/docs/reference/format.md");
+    for (part, source, code, version) in [
+        ("PROTOCOL", "crates/efema-server/src/http.rs", ".route(\"/v1/streams/{name}/entries\"", 1),
+        ("SEAL", "crates/lacodda-seal/src/lib.rs", "const VERSION: u8 = 1;", 1),
+        ("ENTRY", "crates/efema/src/envelope.rs", "const FORMAT: u8 = 2;", 2),
+        ("KEY_ENTRY", "crates/efema/src/envelope.rs", "b\"efema/key-entry/v1\"", 1),
+        ("LAYOUT", "crates/efema/src/bucket/layout.rs", "pub(crate) const FORMAT: u32 = 1;", 1),
+    ] {
+        assert!(read(source).contains(code), "`{code}` moved in {source}");
+        assert!(
+            page.contains(&format!("<!-- {part} -->{version} |")),
+            "the format page does not give {part} as {version}"
+        );
+    }
+    // The vectors say which versions they are of, and the page links them.
+    let vectors = read("docs/public/format-vectors.txt");
+    assert!(
+        vectors.starts_with(
+            "# efema's format vectors: protocol 1, lacodda-seal format 1, entry format 2,\n# bucket layout 1."
+        ),
+        "the vectors name other versions than the page"
+    );
+    assert!(page.contains("](/efema/format-vectors.txt)"), "the format page does not link the vectors");
 }
 
 #[test]

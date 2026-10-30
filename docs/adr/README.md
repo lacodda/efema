@@ -25,3 +25,4 @@ earlier one says so; the earlier one is marked superseded rather than deleted.
 | [0018](0018-the-relay-answers-only-through-the-door.md) | The relay answers its own machine and HTTPS through the door, and nothing else | Accepted |
 | [0019](0019-a-request-is-held-to-progress-not-a-clock.md) | A request is held to progress, not to a clock | Accepted |
 | [0020](0020-a-stream-in-a-bucket.md) | A stream in a bucket, kept in order by creating only what is not there | Accepted |
+| [0021](0021-the-format-is-a-contract-of-versioned-parts.md) | The format is a contract of parts, each with a version, held by vectors two implementations write | Accepted |

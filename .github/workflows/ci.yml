@@ -138,3 +138,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build on the declared MSRV
         run: cargo check --workspace --all-targets
+
+  # The format vectors come from a second implementation of the format, in
+  # Python (ADR 0021): it writes them again here, and the file has to be what
+  # it writes. The Rust side reads them back in the gate above. A venv, since
+  # the runner's Python takes no packages system-wide.
+  vectors:
+    name: Format vectors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Write the vectors again, and compare
+        run: |
+          python3 -m venv "$RUNNER_TEMP/vectors"
+          "$RUNNER_TEMP/vectors/bin/pip" install --quiet "cryptography>=44"
+          "$RUNNER_TEMP/vectors/bin/python" tools/format-vectors.py --check

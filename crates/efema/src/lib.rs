@@ -94,6 +94,8 @@ mod relay;
 mod stall;
 mod state;
 mod transport;
+#[cfg(test)]
+mod vectors;
 
 pub use bucket::{Bucket, Credentials};
 pub use client::{Client, Pulled, Received, Secret, Sent};
