@@ -25,7 +25,7 @@
 use efema_proto::{Epoch, limits};
 use lacodda_seal::{Key, LockedKey, SEALED_OVERHEAD};
 
-use crate::DeviceId;
+use crate::{DeviceId, Part};
 
 /// The context a stream's key is locked for.
 pub(crate) const KEY_CONTEXT: &[u8] = b"efema/stream-key/v1";
@@ -33,11 +33,10 @@ pub(crate) const KEY_CONTEXT: &[u8] = b"efema/stream-key/v1";
 const KEY_ENTRY_DOMAIN: &[u8] = b"efema/key-entry/v1";
 /// The domain in front of an entry's epoch in its context.
 const ENTRY_DOMAIN: &[u8] = b"efema/entry/v1";
-/// The entry format this release writes and the newest it reads.
+/// The entry format this release writes, and the only one it reads. Format 1
+/// was efema 0.2's, before the codec byte; its number stays taken, and an
+/// entry in it does not open.
 const FORMAT: u8 = 2;
-/// The entry format of efema 0.2, read and no longer written: no codec byte,
-/// the item uncompressed.
-const FORMAT_1: u8 = 1;
 /// The item as it is.
 const CODEC_NONE: u8 = 0;
 /// The item as one zstd frame.
@@ -104,10 +103,9 @@ pub(crate) fn seal(
 pub(crate) enum Opened {
     /// The device that wrote it, and the item.
     Entry { device: DeviceId, data: Vec<u8> },
-    /// An entry format newer than this release reads.
-    NewerFormat(u8),
-    /// A codec newer than this release reads.
-    NewerCodec(u8),
+    /// A version of a part - the entry's format, or its codec - newer than
+    /// this release reads.
+    Newer(Part, u8),
 }
 
 /// Opens a sealed entry written in `epoch`.
@@ -124,14 +122,11 @@ pub(crate) fn open(key: &Key, epoch: Epoch, sealed: &[u8]) -> Result<Opened, lac
             let data = match plaintext[INNER_HEADER - 1] {
                 CODEC_NONE => body.to_vec(),
                 CODEC_ZSTD => expand(body).ok_or(nonsense)?,
-                codec => return Ok(Opened::NewerCodec(codec)),
+                codec => return Ok(Opened::Newer(Part::Codec, codec)),
             };
             Ok(Opened::Entry { device: device(&plaintext), data })
         }
-        Some(&FORMAT_1) if plaintext.len() >= 17 => {
-            Ok(Opened::Entry { device: device(&plaintext), data: plaintext[17..].to_vec() })
-        }
-        Some(&version) if version > FORMAT => Ok(Opened::NewerFormat(version)),
+        Some(&version) if version > FORMAT => Ok(Opened::Newer(Part::Entry, version)),
         _ => Err(nonsense),
     }
 }
@@ -164,13 +159,22 @@ impl KeyEntry {
 
     /// Reads a key entry; its seal is checked by [`KeyEntry::generation`],
     /// with the key.
-    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, lacodda_seal::Error> {
-        let at = bytes
-            .len()
-            .checked_sub(KEY_SEAL_LEN)
-            .ok_or(lacodda_seal::Error::Malformed { expected: "key entry", reason: "shorter than the key's seal" })?;
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, Unread> {
+        let at = bytes.len().checked_sub(KEY_SEAL_LEN).ok_or(Unread::Malformed(lacodda_seal::Error::Malformed {
+            expected: "key entry",
+            reason: "shorter than the key's seal",
+        }))?;
         let (lock, seal) = bytes.split_at(at);
-        Ok(Self { lock: LockedKey::from_bytes(lock)?, seal: seal.to_vec() })
+        let lock = LockedKey::from_bytes(lock).map_err(|e| match e {
+            lacodda_seal::Error::NewerFormat { found, .. } => Unread::Newer(Part::Lock, found),
+            e => Unread::Malformed(e),
+        })?;
+        // Any other fault in the seal is the key's to find: a seal it does
+        // not open was not written by a device holding it.
+        if let Err(lacodda_seal::Error::NewerFormat { found, .. }) = lacodda_seal::sealed_key_id(seal) {
+            return Err(Unread::Newer(Part::Seal, found));
+        }
+        Ok(Self { lock, seal: seal.to_vec() })
     }
 
     pub(crate) fn to_bytes(&self) -> Vec<u8> {
@@ -186,6 +190,16 @@ impl KeyEntry {
     }
 }
 
+/// Why bytes that start as a key entry are not one this release reads.
+#[derive(Debug)]
+pub(crate) enum Unread {
+    /// A part of it - the lock, or the key's seal - is in a version newer
+    /// than this release reads.
+    Newer(Part, u8),
+    /// It is not a key entry.
+    Malformed(lacodda_seal::Error),
+}
+
 fn key_entry_context(lock: &[u8]) -> Vec<u8> {
     [KEY_ENTRY_DOMAIN, lock].concat()
 }
@@ -199,7 +213,7 @@ mod tests {
     fn opened(key: &Key, epoch: Epoch, sealed: &[u8]) -> (DeviceId, Vec<u8>) {
         match open(key, epoch, sealed) {
             Ok(Opened::Entry { device, data }) => (device, data),
-            Ok(Opened::NewerFormat(v) | Opened::NewerCodec(v)) => panic!("written in this format, read as {v}"),
+            Ok(Opened::Newer(part, v)) => panic!("written in this format, read as {part} {v}"),
             Err(e) => panic!("does not open: {e}"),
         }
     }
@@ -286,11 +300,10 @@ mod tests {
         let key = Key::from_bytes([1; 32]);
         let raw = small_frame(5, &raw_block(b"hello"));
         let rle = small_frame(6, &rle_block(true, b'z', 6));
-        let cases: [(u8, Vec<u8>, &[u8]); 4] = [
+        let cases: [(u8, Vec<u8>, &[u8]); 3] = [
             (2, [&[0][..], b"as-is"].concat(), b"as-is"),
             (2, [&[1][..], &raw].concat(), b"hello"),
             (2, [&[1][..], &rle].concat(), b"zzzzzz"),
-            (1, b"format one".to_vec(), b"format one"),
         ];
         for (format, body, item) in cases {
             let sealed = sealed_as(&key, Epoch(1), &[format], &body);
@@ -326,10 +339,12 @@ mod tests {
     fn a_newer_format_or_codec_is_named() {
         let key = Key::from_bytes([1; 32]);
         let sealed = sealed_as(&key, Epoch(1), &[FORMAT + 1], &[]);
-        assert!(matches!(open(&key, Epoch(1), &sealed), Ok(Opened::NewerFormat(v)) if v == FORMAT + 1));
+        assert!(matches!(open(&key, Epoch(1), &sealed), Ok(Opened::Newer(Part::Entry, v)) if v == FORMAT + 1));
         let sealed = sealed_as(&key, Epoch(1), &[FORMAT], &[7, 1, 2, 3]);
-        assert!(matches!(open(&key, Epoch(1), &sealed), Ok(Opened::NewerCodec(7))));
-        for plaintext in [&[][..], &[0], &[FORMAT, 1, 2]] {
+        assert!(matches!(open(&key, Epoch(1), &sealed), Ok(Opened::Newer(Part::Codec, 7))));
+        // Format 1 - efema 0.2's: a device, then the item - opens as nothing.
+        let format_one = [&[1][..], DEVICE.as_bytes(), b"format one"].concat();
+        for plaintext in [&[][..], &[0], &[FORMAT, 1, 2], &format_one] {
             let sealed = key.seal(&context(Epoch(1)), plaintext).unwrap();
             assert!(open(&key, Epoch(1), &sealed).is_err(), "{plaintext:?} opened");
         }

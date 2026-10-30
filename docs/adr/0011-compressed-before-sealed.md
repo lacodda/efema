@@ -1,6 +1,8 @@
 # ADR 0011: Items are compressed before they are sealed, with a codec byte of their own
 
-- Status: accepted
+- Status: accepted; amended by [ADR 0021](0021-the-format-is-a-contract-of-versioned-parts.md) -
+  `NewerEntryFormat` and `NewerCodec` are one `NewerFormat` naming the part, and
+  entry format 1 is no longer read
 - Date: 2026-10-09
 
 ## Context

@@ -8,10 +8,10 @@ use efema_proto::wire::{Batch, Entry, Limits, ProblemCode, Watch};
 use efema_proto::{Cursor, Epoch, StreamId, StreamName, chain};
 use lacodda_seal::{Key, KeyId, LockedKey};
 
-use crate::envelope::{self, Compression, ENTRY_OVERHEAD, KEY_CONTEXT, KeyEntry, Opened};
+use crate::envelope::{self, Compression, ENTRY_OVERHEAD, KEY_CONTEXT, KeyEntry, Opened, Unread};
 use crate::state::{Queue, State, Waiting};
 use crate::transport::{Transport, TransportError};
-use crate::{DeviceId, Error};
+use crate::{DeviceId, Error, Part};
 
 /// What a client opens a stream with. Required: there is no client without
 /// one, and so no way to send an entry unsealed.
@@ -469,7 +469,7 @@ impl<T: Transport> Client<T> {
     ///
     /// # Errors
     ///
-    /// [`Error::NewerEpoch`] and [`Error::NewerEntryFormat`] when the next
+    /// [`Error::NewerEpoch`] and [`Error::NewerFormat`] when the next
     /// entry needs a newer app; [`Error::StreamGone`],
     /// [`Error::StreamReplaced`], [`Error::CursorAhead`] and
     /// [`Error::CursorDiverged`] when the relay's history is no longer the
@@ -541,13 +541,18 @@ impl<T: Transport> Client<T> {
         if !lacodda_seal::is_sealed(&entry.data) {
             return Err(Error::ForeignEntry { stream: stream(), seq: entry.seq });
         }
-        let newer = |version| Error::NewerEntryFormat { stream: stream(), seq: entry.seq, version };
+        let newer = |part, version: u8| Error::NewerFormat {
+            stream: stream(),
+            seq: Some(entry.seq),
+            part,
+            version: version.into(),
+        };
         match lacodda_seal::sealed_key_id(&entry.data) {
             Ok(key) if key != self.key.id() => {
                 return Err(Error::UnknownKey { stream: stream(), seq: entry.seq, key });
             }
             Ok(_) => {}
-            Err(lacodda_seal::Error::NewerFormat { found, .. }) => return Err(newer(found)),
+            Err(lacodda_seal::Error::NewerFormat { found, .. }) => return Err(newer(Part::Seal, found)),
             Err(e) => return Err(e.into()),
         }
         match envelope::open(&self.key, entry.epoch, &entry.data) {
@@ -558,8 +563,7 @@ impl<T: Transport> Client<T> {
                 own: device == self.state.device(),
                 data,
             })),
-            Ok(Opened::NewerFormat(version)) => Err(newer(version)),
-            Ok(Opened::NewerCodec(codec)) => Err(Error::NewerCodec { stream: stream(), seq: entry.seq, codec }),
+            Ok(Opened::Newer(part, version)) => Err(newer(part, version)),
             Err(lacodda_seal::Error::Inauthentic) => Err(Error::Inauthentic { stream: stream(), seq: entry.seq }),
             Err(e) => Err(e.into()),
         }
@@ -569,7 +573,7 @@ impl<T: Transport> Client<T> {
     /// passphrase, or a lock of another key - one a second device wrote while
     /// racing to create the stream, which lost and is nothing for anyone.
     fn check_key_entry(&self, entry: &Entry) -> Result<Step, Error> {
-        let read = KeyEntry::from_bytes(&entry.data)?;
+        let read = key_entry(&self.stream, entry)?;
         if read.lock.key_id() != self.key.id() {
             return Ok(Step::Nothing);
         }
@@ -904,7 +908,7 @@ async fn first_key_entry<T: Transport>(
     // answers, where a full page would carry megabytes of the stream along.
     let read = scan(transport, stream, None, 1, page, |id, entry| {
         if lacodda_seal::is_locked_key(&entry.data) {
-            found = Some((entry.cursor(id), KeyEntry::from_bytes(&entry.data)?));
+            found = Some((entry.cursor(id), key_entry(stream, entry)?));
             return Ok(ControlFlow::Break(()));
         }
         if !lacodda_seal::is_sealed(&entry.data) {
@@ -914,6 +918,17 @@ async fn first_key_entry<T: Transport>(
     })
     .await?;
     Ok(read.and(found))
+}
+
+/// Reads the key entry at `entry`; a lock or a seal newer than this release
+/// reads is named as such.
+fn key_entry(stream: &StreamName, entry: &Entry) -> Result<KeyEntry, Error> {
+    KeyEntry::from_bytes(&entry.data).map_err(|e| match e {
+        Unread::Newer(part, version) => {
+            Error::NewerFormat { stream: stream.clone(), seq: Some(entry.seq), part, version: version.into() }
+        }
+        Unread::Malformed(e) => e.into(),
+    })
 }
 
 /// The key entries of `key` after `after`, with their positions, in stream
@@ -928,7 +943,7 @@ async fn key_entries_after<T: Transport>(
     let mut found = Vec::new();
     scan(transport, stream, Some(after), page, page, |_, entry| {
         if lacodda_seal::is_locked_key(&entry.data) {
-            let read = KeyEntry::from_bytes(&entry.data)?;
+            let read = key_entry(stream, entry)?;
             if read.lock.key_id() == key {
                 found.push((entry.seq, read));
             }

@@ -265,6 +265,68 @@ async fn an_older_app_stops_before_a_newer_epoch_and_cannot_write_behind_it() {
     assert_eq!(received.iter().map(|r| r.epoch.0).collect::<Vec<_>>(), [1, 1, 2]);
 }
 
+/// A newer release on another device may write a part of the format in a
+/// version this one does not read: the entry's format or codec, the seal, a
+/// lock, or the seal over a lock. Whichever it is, a device reads up to it,
+/// stops in front of it, and says which part and which version - it never
+/// reads one part as another.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_part_newer_than_this_release_stops_a_device_in_front_of_it() {
+    let relay = TestRelay::start().await;
+    let context = [b"efema/entry/v1".as_slice(), &1u32.to_be_bytes()].concat();
+    let cases: [(&str, efema::Part, u32); 5] = [
+        ("entry", efema::Part::Entry, 3),
+        ("codec", efema::Part::Codec, 9),
+        ("seal", efema::Part::Seal, 2),
+        ("lock", efema::Part::Lock, 2),
+        ("lock-seal", efema::Part::Seal, 2),
+    ];
+    for (stream, part, version) in cases {
+        let writer = Device::new();
+        let on_writer = writer.open(relay.transport(), stream, 1).await;
+        on_writer.push([b"before it"]).await.unwrap();
+        let key = on_writer.key();
+        let device = writer.state.device();
+        let inner = |format: u8, codec: u8| [&[format][..], device.as_bytes(), &[codec], b"an item"].concat();
+        let lock = on_writer.locked_key().to_bytes();
+        let generation = key.seal(&[b"efema/key-entry/v1".as_slice(), &lock].concat(), &7u32.to_be_bytes()).unwrap();
+        let newer = match stream {
+            "entry" => key.seal(&context, &inner(3, 0)).unwrap(),
+            "codec" => key.seal(&context, &inner(2, 9)).unwrap(),
+            "seal" => {
+                let mut sealed = key.seal(&context, &inner(2, 0)).unwrap();
+                sealed[1] = 2;
+                sealed
+            }
+            "lock" => {
+                let mut entry = [lock.clone(), generation].concat();
+                entry[1] = 2;
+                entry
+            }
+            _ => {
+                let mut seal = generation;
+                seal[1] = 2;
+                [lock.clone(), seal].concat()
+            }
+        };
+        let batch = efema::wire::Batch { epoch: Epoch(1), entries: vec![newer], stream: Some(on_writer.stream_id()) };
+        relay.transport().append(&name(stream), &batch).await.unwrap();
+
+        let reader = Device::new();
+        let on_reader = reader.open(relay.transport(), stream, 1).await;
+        let pulled = on_reader.pull().await.unwrap();
+        assert_eq!(data(&pulled.entries), [b"before it".as_slice()], "{stream}");
+        on_reader.ack(&pulled).await.unwrap();
+        let stopped = on_reader.pull().await.unwrap_err();
+        let Error::NewerFormat { seq: Some(3), part: named, version: found, .. } = &stopped else {
+            panic!("{stream}: {stopped:?}");
+        };
+        assert_eq!((*named, *found), (part, version), "{stream}");
+        assert!(stopped.to_string().contains(&format!("is in {part} {version}, newer")), "{stopped}");
+        assert_eq!(on_reader.cursor().await.unwrap().seq, 2, "{stream}: the cursor moved past it");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_push_is_cut_to_what_one_request_may_carry() {
     let relay = TestRelay::start().await;

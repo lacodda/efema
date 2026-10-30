@@ -5,7 +5,7 @@
 //! the one thing S3 does atomically: creating an object only if there is
 //! none under its key. The layout that rests on it is in [`layout`].
 
-mod layout;
+pub(crate) mod layout;
 mod sign;
 mod xml;
 
@@ -21,6 +21,7 @@ use reqwest::{Method, StatusCode};
 use tokio::sync::OnceCell;
 use tokio::time::Instant;
 
+use crate::Part;
 use crate::relay::{CONNECT_TIMEOUT, InvalidUrl, address};
 use crate::stall::{Pulse, STALL, Upload};
 use crate::transport::{Transport, TransportError};
@@ -416,12 +417,18 @@ impl Bucket {
         };
         let record: Record = wire::decode(&answer.body)
             .map_err(|e| self.not_protocol(format!("the record of stream {stream} does not read: {e}")))?;
+        if record.format > layout::FORMAT {
+            return Err(TransportError::NewerFormat {
+                at: self.base(),
+                stream: stream.clone(),
+                part: Part::Layout,
+                version: record.format,
+            });
+        }
         if record.format != layout::FORMAT {
-            return Err(self.not_protocol(format!(
-                "stream {stream} is laid out in format {}, and this efema reads format {}: it was written by a newer release",
-                record.format,
-                layout::FORMAT
-            )));
+            return Err(
+                self.not_protocol(format!("stream {stream} is laid out in format {}, which none is", record.format))
+            );
         }
         Ok(Some(record.id))
     }

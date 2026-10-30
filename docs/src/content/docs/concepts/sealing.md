@@ -115,8 +115,8 @@ item says.
 An entry that is not compressed is <!-- ENTRY_OVERHEAD -->68 bytes longer than
 the item in it.
 
-Entries of format `1`, which efema 0.2 wrote, are read still and no longer
-written: `1 || device || item`, no codec byte, the item as it is.
+Format `1` was efema 0.2's, before the codec byte. Its number stays taken: no
+entry is written in it again, and one that is does not open.
 
 ## A key entry
 

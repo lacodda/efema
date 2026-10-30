@@ -503,6 +503,24 @@ async fn a_bucket_that_says_one_thing_and_holds_another_is_not_believed() {
     assert!(lying.swapped(), "the proxy changed nothing");
 }
 
+/// A stream a newer release laid out in a newer layout is not read as this
+/// one, and the app is told to update - not to try again later.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stream_in_a_newer_layout_is_named_and_not_read() {
+    let Some(at) = Settings::from_env() else { return };
+    let stream = at.fresh("layout");
+    let written = at.bucket().append(&stream, &batch(&[b"a"], None)).await.unwrap();
+    let record = |format: u8| -> &'static [u8] {
+        Box::leak([&[0xa2, 0x00, 0x50][..], written.stream.as_bytes(), &[0x01, format]].concat().into_boxed_slice())
+    };
+    let newer = Proxy::start(at.upstream(), Some((record(1), record(2)))).await;
+    let read = at.through(newer.addr).read(&stream, None, 100).await.unwrap_err();
+    assert!(newer.swapped(), "the proxy changed nothing");
+    let error = Error::from(read);
+    assert!(matches!(&error, Error::NewerFormat { seq: None, part: efema::Part::Layout, version: 2, .. }), "{error:?}");
+    assert!(error.to_string().contains("is in bucket layout 2, newer than this library reads"), "{error}");
+}
+
 /// Credentials the bucket lets read and not write: the device reads the
 /// stream, and nothing it pushes is kept to be sent - nor can it start a
 /// stream.

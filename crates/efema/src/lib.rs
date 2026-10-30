@@ -101,7 +101,7 @@ pub use doctor::{KeyReport, QUEUE_STALE, RelayReport, Report};
 pub use efema_proto::wire::Limits;
 pub use efema_proto::{ACCESS_KEY_PREFIX, AccessKey, Cursor, Epoch, ParseAccessKeyError, StreamId, StreamName};
 pub use envelope::{Compression, ENTRY_OVERHEAD};
-pub use error::Error;
+pub use error::{Error, Part};
 pub use lacodda_seal::{Key, KeyId, LockedKey};
 pub use relay::{InvalidUrl, Relay};
 pub use stall::STALL;

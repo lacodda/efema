@@ -12,6 +12,8 @@ use std::time::Duration;
 use efema_proto::wire::{Batch, Heads, Limits, Page, Problem, ProblemCode, Watch, Written};
 use efema_proto::{Cursor, StreamName};
 
+use crate::Part;
+
 /// A way to reach streams.
 ///
 /// [`Relay`](crate::Relay) is the one this release ships: an efema relay over
@@ -81,6 +83,20 @@ pub enum TransportError {
         at: String,
         /// How long nothing moved.
         quiet: Duration,
+    },
+    /// The stream is kept in a version of a part of the format newer than
+    /// this release reads - a bucket a newer efema laid the stream out in.
+    /// The app needs updating.
+    #[error("{at}: stream {stream} is in {part} {version}, newer than this efema reads")]
+    NewerFormat {
+        /// Where the stream is.
+        at: String,
+        /// The stream.
+        stream: StreamName,
+        /// Which part of the format.
+        part: Part,
+        /// The version it is in.
+        version: u32,
     },
     /// Something answered, but not in the protocol: not an efema relay, or a
     /// proxy in front of it answering for itself.

@@ -12,7 +12,7 @@ use crate::transport::TransportError;
 ///
 /// The variants are sorted by what the app can do: try again later
 /// ([`Error::Transport`], [`Error::Unsent`]), update itself ([`Error::EpochBehind`],
-/// [`Error::NewerEpoch`], [`Error::NewerEntryFormat`], [`Error::NewerCodec`]),
+/// [`Error::NewerEpoch`], [`Error::NewerFormat`]),
 /// ask the person ([`Error::WrongPassphrase`], [`Error::KeyMismatch`],
 /// [`Error::PassphraseRace`]) or the relay's operator ([`Error::Unauthorized`],
 /// [`Error::ReadOnly`], [`Error::QuotaExceeded`]), or recover a stream
@@ -76,16 +76,13 @@ pub enum Error {
     /// cursor stays before it; the app needs updating to read on.
     #[error("stream {stream}: the entry at position {seq} is in epoch {entry}, and this app reads up to epoch {ours}")]
     NewerEpoch { stream: StreamName, seq: u64, ours: Epoch, entry: Epoch },
-    /// The next entry was sealed by a newer release of this library, in a
-    /// format this one does not read. The cursor stays before it.
-    #[error("stream {stream}: the entry at position {seq} is in entry format {version}, newer than this library reads")]
-    NewerEntryFormat { stream: StreamName, seq: u64, version: u8 },
-    /// The next entry was compressed by a newer release of this library, in
-    /// a way this one does not read. The cursor stays before it.
-    #[error(
-        "stream {stream}: the entry at position {seq} is compressed with codec {codec}, newer than this library reads"
-    )]
-    NewerCodec { stream: StreamName, seq: u64, codec: u8 },
+    /// A newer release of this library wrote part of the stream in a
+    /// version of the format this one does not read: `part` says which part,
+    /// `version` which version. `seq` is the entry's position - none for the
+    /// stream's layout in a bucket, which is the whole stream's. Nothing past
+    /// it is read, and the cursor stays before it; the app needs updating.
+    #[error("{}", newer_format(stream, *seq, *part, *version))]
+    NewerFormat { stream: StreamName, seq: Option<u64>, part: Part, version: u32 },
 
     /// The passphrase does not unlock the stream's key. When the passphrase
     /// was changed on another device, the old one stops opening the stream
@@ -163,6 +160,48 @@ pub enum Error {
     Random,
 }
 
+/// A part of the format, each with a version of its own - what
+/// [`Error::NewerFormat`] names. The
+/// [format page](https://lacodda.github.io/efema/reference/format/) says
+/// where each one carries its version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Part {
+    /// How a stream is kept in a bucket: the `format` of its record.
+    Layout,
+    /// A sealed blob of `lacodda-seal`: its second byte.
+    Seal,
+    /// A lock of a stream's key, of `lacodda-seal`: its second byte.
+    Lock,
+    /// What a sealed entry holds: its first byte inside the seal.
+    Entry,
+    /// How an entry holds its item: the codec byte.
+    Codec,
+}
+
+impl std::fmt::Display for Part {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Layout => "bucket layout",
+            Self::Seal => "seal format",
+            Self::Lock => "lock format",
+            Self::Entry => "entry format",
+            Self::Codec => "codec",
+        })
+    }
+}
+
+fn newer_format(stream: &StreamName, seq: Option<u64>, part: Part, version: u32) -> String {
+    match seq {
+        Some(seq) => {
+            format!(
+                "stream {stream}: the entry at position {seq} is in {part} {version}, newer than this library reads"
+            )
+        }
+        None => format!("stream {stream} is in {part} {version}, newer than this library reads"),
+    }
+}
+
 impl From<TransportError> for Error {
     /// A refusal that means the same wherever it comes from has a variant of
     /// its own; the rest stay what the transport said.
@@ -170,6 +209,9 @@ impl From<TransportError> for Error {
         match &e {
             TransportError::Refused { at, problem } if problem.code == ProblemCode::Unauthorized => {
                 Self::Unauthorized { relay: at.clone() }
+            }
+            TransportError::NewerFormat { stream, part, version, .. } => {
+                Self::NewerFormat { stream: stream.clone(), seq: None, part: *part, version: *version }
             }
             _ => Self::Transport(e),
         }
