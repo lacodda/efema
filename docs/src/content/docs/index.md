@@ -74,7 +74,7 @@ what changes against a relay.
 
 ## Status
 
-0.7.0 is the relay and the Rust client library,
+0.8.0 is the relay and the Rust client library,
 [`efema`](https://docs.rs/efema), which syncs through a relay or through an S3
 bucket with nothing to run ([Without a server](/efema/guides/without-a-server/)),
 and a relay safe to leave reachable behind an HTTPS proxy: access keys to spaces, that read or that write; limits per key,
@@ -84,5 +84,8 @@ command and runs as a service on a Linux server
 sealed on the device with a key the relay never has, kept there until the
 relay has it and written once however often a broken network sends it again;
 a connection gone silent is given up on in half a minute, a slow one is never
-cut. Each of those promises is shown by tests, not only stated.
+cut. Each of those promises is shown by tests, not only stated. What a device
+writes is a contract, each part at a version of its own, with vectors a client
+in another language checks itself against ([Format](/efema/reference/format/));
+1.0 freezes it.
 [Syncing an app](/efema/guides/syncing-an-app/) is where to start.

@@ -22,6 +22,30 @@ A release is added with:
 $ git cliff --unreleased --tag vX.Y.Z --prepend CHANGELOG.md
 ```
 
+## [0.8.0] - 2026-10-30
+
+### Breaking Changes
+
+- **Name the part of the format a reader meets too new**: `Error::NewerEntryFormat` and `Error::NewerCodec` are
+replaced by `Error::NewerFormat { stream, seq, part, version }`, with
+`seq` an `Option` - none for a bucket's layout.
+
+### Features
+
+- Name the part of the format a reader meets too new
+
+### Documentation
+
+- Show the server install and upgrade of 0.7.0 as they printed
+- Write the format down as a contract, with vectors to check it
+- Say what to do when something goes wrong
+- Keep efema's own header, naming the format's parts
+
+### Standard
+
+- Take the line's standard 2026.11.1
+- Ask setup-node for the newest Node in the docs jobs
+
 ## [0.7.0] - 2026-10-23
 
 ### Features

@@ -12,16 +12,16 @@ up, and the same two upgrade it.
 
 ```console
 $ curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/install.sh | sudo EFEMA_INSTALL_DIR=/usr/local/bin sh
-Downloading https://github.com/lacodda/efema/releases/download/v0.7.0/efema-server-v0.7.0-aarch64-unknown-linux-gnu.tar.gz
-Installed efema-server 0.7.0 to /usr/local/bin/efema-server
+Downloading https://github.com/lacodda/efema/releases/download/v0.8.0/efema-server-v0.8.0-aarch64-unknown-linux-gnu.tar.gz
+Installed efema-server 0.8.0 to /usr/local/bin/efema-server
 Next: https://lacodda.github.io/efema/getting-started/ - or, as a service on a Linux server, https://lacodda.github.io/efema/guides/on-a-server/
 $ curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/service.sh | sudo sh
 Made the system user efema
-efema-server 0.7.0 answers on port 2451, data in /var/lib/efema
+efema-server 0.8.0 answers on port 2451, data in /var/lib/efema
 ```
 
 The first puts the binary from the latest release - for x86_64 or 64-bit ARM,
-a Raspberry Pi among them - in `/usr/local/bin`; `EFEMA_VERSION=v0.7.0` pins a
+a Raspberry Pi among them - in `/usr/local/bin`; `EFEMA_VERSION=v0.8.0` pins a
 release instead. The second, which needs systemd:
 
 - makes the system user `efema` and its data directory, the first time;
@@ -126,12 +126,12 @@ database to a newer schema, and that only goes forward:
 
 ```console
 $ curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/install.sh | sudo EFEMA_INSTALL_DIR=/usr/local/bin sh
-Downloading https://github.com/lacodda/efema/releases/download/v0.7.0/efema-server-v0.7.0-aarch64-unknown-linux-gnu.tar.gz
-Installed efema-server 0.7.0 to /usr/local/bin/efema-server
+Downloading https://github.com/lacodda/efema/releases/download/v0.8.0/efema-server-v0.8.0-aarch64-unknown-linux-gnu.tar.gz
+Installed efema-server 0.8.0 to /usr/local/bin/efema-server
 Next: https://lacodda.github.io/efema/getting-started/ - or, as a service on a Linux server, https://lacodda.github.io/efema/guides/on-a-server/
 $ curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/service.sh | sudo sh
 Copied /var/lib/efema to /var/lib/efema.backups/20261023T175013Z
-efema-server 0.7.0 answers on port 2451, data in /var/lib/efema
+efema-server 0.8.0 answers on port 2451, data in /var/lib/efema
 ```
 
 The newest five copies are kept in `/var/lib/efema.backups`. Putting one back

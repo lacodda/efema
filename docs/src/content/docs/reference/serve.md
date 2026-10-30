@@ -66,7 +66,7 @@ its devices keep what they push.
 
 ```console
 $ efema-server serve --data ./relay
-2026-10-23T17:36:12.936616Z  INFO efema-server 0.7.0 listening on http://127.0.0.1:2451, data in ./relay
+2026-10-23T17:36:12.936616Z  INFO efema-server 0.8.0 listening on http://127.0.0.1:2451, data in ./relay
 2026-10-23T17:36:12.936914Z  INFO answering this machine and HTTPS forwarded by 127.0.0.0/8, ::1/128; batches up to 16777216 bytes, entries up to 8388608, 8589934592 bytes a space, 600 requests a minute a key
 2026-10-14T09:39:39.244673Z  INFO home/vault: wrote 1 entry (172 bytes) at 1, epoch 1
 2026-10-14T09:39:39.300767Z  INFO home/vault: read 1 entry after 0
@@ -94,7 +94,7 @@ efema_bytes{space="home"} 48900
 efema_keys{space="home"} 3
 efema_last_write_seconds{space="home"} 1791970785
 efema_last_use_seconds{space="home"} 1791970789
-efema_info{version="0.7.0"} 1
+efema_info{version="0.8.0"} 1
 ```
 
 Counts and times in the text format Prometheus reads: when the relay started,
