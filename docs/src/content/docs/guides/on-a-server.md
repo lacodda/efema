@@ -143,3 +143,5 @@ is the same as any [backup](/efema/guides/backups/#restoring).
 - [Behind a reverse proxy](/efema/guides/behind-a-reverse-proxy/) - the door.
 - [Backups](/efema/guides/backups/) - taking them while it runs, and putting
   one back.
+- [When something goes wrong](/efema/guides/when-something-goes-wrong/) - a
+  full space, a key to replace, a move to another machine.

@@ -135,6 +135,18 @@ devices can change the same thing before either hears from the other, and
 only the stream's order says which change came last. Skipping your own entries
 is the classic way two devices end up disagreeing.
 
+**Know a change by what it says, not only by where it lands.** Sealing proves
+an entry was written by a device that has the key, not that it is new: a
+relay that misbehaves can write an old entry into the stream again, further
+on, and it opens as it did the first time
+([threat model](/efema/concepts/threat-model/#what-a-dishonest-relay-can-do)).
+A change that carries something of its own - an identity, the version of what
+it replaces, a clock - is one the app can tell it has applied, wherever it
+appears. An app that takes whatever comes last in the stream as the truth
+would take the old change back. The mini-vault example names the version each
+change replaces, and keeps every version a change overlooked beside it: a
+repeat costs it a conflict copy, not a file.
+
 ## When the network breaks
 
 A phone on a train, a laptop closing its lid, a relay restarting: sending
@@ -309,5 +321,7 @@ command.
   the library, with merging.
 - [Without a server](/efema/guides/without-a-server/) - the same, through an
   S3 bucket.
+- [When something goes wrong](/efema/guides/when-something-goes-wrong/) - every
+  case above, with what the operator does about it.
 - [Sealing](/efema/concepts/sealing/) - the keys and the formats.
 - [The API on docs.rs](https://docs.rs/efema) - every type and method.

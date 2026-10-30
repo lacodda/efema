@@ -100,5 +100,7 @@ over HTTP, a handful of endpoints - is a client too, if it seals the way
 - [Threat model](/efema/concepts/threat-model/) - what the relay can see, and
   what it cannot.
 - [Syncing an app](/efema/guides/syncing-an-app/) - the client library.
+- [When something goes wrong](/efema/guides/when-something-goes-wrong/) - a
+  torn connection, a changed key, a full space, a relay that moves.
 - [Commands](/efema/reference/commands/) - the data directory, the logs and
   every flag.

@@ -125,6 +125,13 @@ trustworthy in every other way. A relay that wants to misbehave can:
 - **withhold** entries - from everyone, or from some devices;
 - **delay** them, or answer waits late;
 - **drop** a stream, or the whole database;
+- **repeat** an entry: write one it holds into the stream again, further on.
+  It opens like the first time - sealing says the entry was written by a
+  device with the key, not that it is new. An app that knows a change by what
+  the change says - its own identity, the version of what it replaces - takes
+  it for the change it has applied; an app that takes whatever comes last in
+  the stream as the truth takes an old change back
+  ([Syncing an app](/efema/guides/syncing-an-app/#pull-apply-acknowledge));
 - **show different histories to different devices.** The hash chain catches a
   history that changed under a cursor by accident, but a relay that lies on
   purpose can compute a chain for whatever history it likes.
