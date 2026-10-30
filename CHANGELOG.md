@@ -1,8 +1,22 @@
 # Changelog
 
-All notable changes to this project are documented here. The file is
-written by [git-cliff](https://git-cliff.org) from the commits since the
-last release, which follow [Conventional Commits](https://www.conventionalcommits.org):
+All notable changes to efema are documented here, generated from the commit
+history by [git-cliff](https://git-cliff.org).
+
+What a device writes is a contract of five parts, each with a version of its
+own: the protocol (1, paths under `/v1`), the sealed blob and the lock (1),
+the entry (2), the key entry (1) and a stream's layout in a bucket (1) - see
+https://lacodda.github.io/efema/reference/format/. A change to any of them is
+a new version of that part, with a "Breaking Changes" section here and the way
+across, or a plain statement that there is none. The relay's database and the
+client's state file carry schema versions of their own, checked before
+reading, and each release carries an older one forward.
+
+`lacodda-seal` and `lacodda-tear` keep versions of their own (lacodda-seal
+0.1.0 since efema 0.2.0, lacodda-tear 0.1.0 since efema 0.4.0 and 0.1.1 since 0.6.0); their changes
+are listed under the efema release they shipped with.
+
+A release is added with:
 
 ```console
 $ git cliff --unreleased --tag vX.Y.Z --prepend CHANGELOG.md
