@@ -168,6 +168,11 @@ async fn a_copy_does_not_go_over_another_history() {
     let head = everything(&old.transport(), "notes").await.head;
     let parted = copy(&old.transport(), &target.transport(), &name("notes")).await.unwrap_err();
     assert!(matches!(parted, CopyError::Parted { seq, .. } if seq == head), "{parted}");
+    // And with the target further on than the stream: where the stream
+    // ends, the target has another entry.
+    on_phone.push([b"more".as_slice()]).await.unwrap();
+    let parted = copy(&old.transport(), &target.transport(), &name("notes")).await.unwrap_err();
+    assert!(matches!(parted, CopyError::Parted { seq, .. } if seq == head), "{parted}");
 }
 
 /// A target that someone else writes to while the copy goes on: a batch of
