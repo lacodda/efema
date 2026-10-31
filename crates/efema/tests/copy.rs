@@ -289,9 +289,11 @@ async fn a_copy_needs_a_target_that_writes() {
 }
 
 /// A relay older than the places: it takes no copy's first batch, and puts
-/// any other wherever its next place is.
+/// any other wherever its next place is - after a batch of someone else's,
+/// when `race` is set, on the first append.
 struct Older {
     relay: Relay,
+    race: std::sync::atomic::AtomicBool,
 }
 
 impl Transport for Older {
@@ -304,6 +306,10 @@ impl Transport for Older {
     }
 
     async fn append(&self, stream: &StreamName, batch: &Batch) -> Result<Written, TransportError> {
+        if self.race.swap(false, Ordering::SeqCst) {
+            let theirs = Batch { entries: vec![b"someone else's".to_vec()], first: None, ..batch.clone() };
+            self.relay.append(stream, &theirs).await?;
+        }
         self.relay.append(stream, &Batch { first: None, ..batch.clone() }).await
     }
 
@@ -322,18 +328,20 @@ async fn a_target_older_than_the_places_is_told_apart() {
     let laptop = Device::new();
     let on_laptop = laptop.open(old.transport(), "notes", 1).await;
     on_laptop.push([b"one".as_slice()]).await.unwrap();
-    let older = Older { relay: new.transport() };
+    let older = Older { relay: new.transport(), race: false.into() };
     let error = copy(&old.transport(), &older, &name("notes")).await.unwrap_err();
     assert!(matches!(error, CopyError::OldTarget { .. }), "{error}");
 
     // With the stream there already, a batch it puts somewhere else than
-    // the copy asked is caught by where it says it went.
+    // the copy asked - someone else wrote first - is caught by where it
+    // says it went, and the copy stops there.
     copy(&old.transport(), &new.transport(), &name("notes")).await.unwrap();
-    let stranger = Device::new().open(new.transport(), "notes", 1).await;
-    stranger.push([b"elsewhere".as_slice()]).await.unwrap();
     on_laptop.push([b"two".as_slice()]).await.unwrap();
-    let error = copy(&old.transport(), &older, &name("notes")).await.unwrap_err();
+    on_laptop.push([b"three".as_slice()]).await.unwrap();
+    let racing = Older { relay: new.transport(), race: true.into() };
+    let error = copy(&old.transport(), &racing, &name("notes")).await.unwrap_err();
     assert!(matches!(error, CopyError::Parted { seq: 3, .. }), "{error}");
+    assert_eq!(everything(&new.transport(), "notes").await.head, 4, "the copy wrote on past where it parted");
 }
 
 /// A target that keeps something other than what it was sent: a byte of
