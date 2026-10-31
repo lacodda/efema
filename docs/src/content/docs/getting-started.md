@@ -19,7 +19,7 @@ On Windows, in PowerShell:
 ```
 
 Either puts `efema-server` from the latest release in your user's programs
-(`~/.local/bin`, `%LOCALAPPDATA%\Programs\efema`); `EFEMA_VERSION=v0.8.0` pins a
+(`~/.local/bin`, `%LOCALAPPDATA%\Programs\efema`); `EFEMA_VERSION=v0.9.0` pins a
 release and `EFEMA_INSTALL_DIR` picks the directory. With a Rust toolchain,
 `cargo install efema-server` builds it instead, and the archives are on the
 [latest release](https://github.com/lacodda/efema/releases/latest).
@@ -46,7 +46,7 @@ relay too.
 
 ```console
 $ efema-server serve
-2026-10-23T17:36:12.936616Z  INFO efema-server 0.8.0 listening on http://127.0.0.1:2451, data in /home/you/.local/share/efema
+2026-10-23T17:36:12.936616Z  INFO efema-server 0.9.0 listening on http://127.0.0.1:2451, data in /home/you/.local/share/efema
 2026-10-23T17:36:12.936914Z  INFO answering this machine and HTTPS forwarded by 127.0.0.0/8, ::1/128; batches up to 16777216 bytes, entries up to 8388608, 8589934592 bytes a space, 600 requests a minute a key
 ```
 

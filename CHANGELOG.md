@@ -22,6 +22,30 @@ A release is added with:
 $ git cliff --unreleased --tag vX.Y.Z --prepend CHANGELOG.md
 ```
 
+## [0.9.0] - 2026-10-31
+
+### Breaking Changes
+
+- **A batch says where it goes, a page where batches end**: wire::Batch has a `first` field and wire::Entry an
+`ends_batch` one, so a literal of either names them. A relay database
+moves to schema 4 on its first start, and an older release no longer
+opens it.
+
+### Features
+
+- A batch says where it goes, a page where batches end
+- Keep a bucket's streams under a prefix
+- Copy a stream to another relay or bucket, in place
+
+### Documentation
+
+- Show the server upgrade to 0.8.0 as it printed
+
+### Testing
+
+- Check a target ahead of the stream where the stream ends
+- A copy stops at the first batch an old target misplaces
+
 ## [0.8.0] - 2026-10-30
 
 ### Breaking Changes

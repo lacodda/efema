@@ -131,10 +131,12 @@ The model, sealing, the threat model, every command and the protocol:
 
 ## Status
 
-0.8.0 is the relay and the Rust client, which syncs through a relay or an S3
-bucket with nothing to run; through a torn, silent or slow network a push
-lands once. The format is a written contract, each part at a version of its
-own and checked against [vectors](https://lacodda.github.io/efema/reference/format/)
+0.9.0 is the relay and the Rust client, which syncs through a relay or an S3
+bucket - a prefix of a shared one - with nothing to run, and
+[moves a stream](https://lacodda.github.io/efema/guides/moving-a-stream/)
+between them with every device's place kept; through a torn, silent or slow
+network a push lands once. The format is a written contract, each part at a
+version of its own and checked against [vectors](https://lacodda.github.io/efema/reference/format/)
 a second implementation writes; 1.0 freezes it, once two apps live on it.
 Changes: [CHANGELOG](https://github.com/lacodda/efema/blob/main/CHANGELOG.md).
 
