@@ -23,6 +23,8 @@
 //!   [`wait`](Client::wait),
 //!   [`change_passphrase`](Client::change_passphrase), and
 //!   [`doctor`](Client::doctor) to report on all of it.
+//! - [`copy`] - a stream moved to another relay or bucket, every batch at the
+//!   position it had, so each device goes on there from where it stood.
 //!
 //! # Access
 //!
@@ -87,6 +89,7 @@
 
 mod bucket;
 mod client;
+mod copy;
 mod doctor;
 mod envelope;
 mod error;
@@ -99,6 +102,7 @@ mod vectors;
 
 pub use bucket::{Bucket, Credentials};
 pub use client::{Client, Pulled, Received, Secret, Sent};
+pub use copy::{Copied, CopyError, copy};
 pub use doctor::{KeyReport, QUEUE_STALE, RelayReport, Report};
 pub use efema_proto::wire::Limits;
 pub use efema_proto::{ACCESS_KEY_PREFIX, AccessKey, Cursor, Epoch, ParseAccessKeyError, StreamId, StreamName};

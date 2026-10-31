@@ -144,3 +144,31 @@ async fn two_processes_keep_two_folders_the_same() {
     let report = desktop.run(&relay, &["doctor"]);
     assert!(report.contains("up to date"), "{report}");
 }
+
+/// The folder's stream moved to another relay with `mini-vault copy`: each
+/// device syncs there with the state it has, and reads nothing twice.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folder_moved_to_another_relay_syncs_on_from_where_it_was() {
+    let (old, new) = (relay().await, relay().await);
+    let (laptop, desktop) = (Device::new(), Device::new());
+    laptop.write("plan.md", b"before the move");
+    laptop.sync(&old);
+    desktop.sync(&old);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mini-vault"))
+        .args(["--relay", &old.url, "copy", "--to-relay", &new.url])
+        .env("MINI_VAULT_KEY", &old.key)
+        .env("MINI_VAULT_TO_KEY", &new.key)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(output.status.success(), "copy failed:\n{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.starts_with("copied 2 batch(es), 2 entries: vault is the same at "), "{stdout}");
+
+    // Nothing to apply on either side: each reads on from its cursor.
+    assert_eq!(desktop.sync(&new), "");
+    laptop.write("plan.md", b"after the move");
+    laptop.sync(&new);
+    assert!(desktop.sync(&new).contains("applied 1 change(s)"));
+    assert_eq!(desktop.files(), laptop.files());
+}

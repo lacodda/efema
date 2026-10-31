@@ -37,7 +37,9 @@ next request on ([`keys`](/efema/reference/keys/)).
   lock the other devices out.
 - **A key that writes** does all of that, within the space.
 - **Neither reaches another space.** A name there is another stream; a cursor
-  or a stream identity from another space finds nothing.
+  or a stream identity from another space finds nothing - unless someone who
+  holds keys to both [copied](/efema/guides/moving-a-stream/) the stream
+  there, and then it finds the copy.
 
 The relay keeps a digest of each key, not the key, and logs neither. A key is
 a bearer secret: whoever holds it is, to the relay, the device it was handed
@@ -91,7 +93,8 @@ new stream.
 - **A leaked access key works until it is revoked.** Keys are not bound to a
   device or an address. A key that reads, in other hands, downloads the
   stream's ciphertext and its key locks - and with them, the offline guessing
-  of the passphrase below. Revoke a key that leaked; it does not undo what was
+  of the passphrase below. It can copy the stream whole to a relay or a
+  bucket of its own, sealed as it is. Revoke a key that leaked; it does not undo what was
   read with it.
 - **What a revoked key wrote stays.** The stream only grows. Entries a stolen
   key that writes appended are refused by your devices - they do not open -
@@ -235,6 +238,8 @@ a test that stays green with the property gone proves nothing.
 | A lock the key did not seal is refused, and an old one written again moves no device back. | `a_lock_the_key_did_not_seal_moves_nothing` ([crates/efema/tests/client.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/client.rs)) |
 | A connection on which nothing moves is given up on after `STALL` - a push, a pull and a wait alike - and what was pushed lands once when the network moves again; a slow connection that keeps moving is never cut, a push and a pull each taking longer than `STALL`, and neither is a wait the relay holds for longer. | `a_connection_gone_silent_is_given_up_and_what_waited_lands_once`, `a_slow_connection_that_keeps_moving_is_never_cut`, `a_wait_longer_than_stall_is_the_relay_working_not_a_stall` ([crates/efema/tests/torn.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/torn.rs)), `a_request_that_keeps_moving_is_never_taken_for_stalled` ([crates/efema/src/stall.rs](https://github.com/lacodda/efema/blob/main/crates/efema/src/stall.rs)) |
 | A batch torn on its way to the relay is not written, not even in part, and goes again whole. | `a_batch_torn_on_its_way_up_is_not_written_and_goes_again_whole` ([crates/efema/tests/torn.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/torn.rs)), `a_batch_torn_on_its_way_in_writes_nothing` ([crates/efema-server/tests/relay.rs](https://github.com/lacodda/efema/blob/main/crates/efema-server/tests/relay.rs)) |
+| A stream copied elsewhere - another relay, another space, a bucket, and back - keeps every device's cursor and every batch waiting on a device, which is known there and not written twice; a copy that stopped goes on, writes nothing over another history, and nothing of a source whose chain does not hold. | `a_moved_stream_goes_on_from_where_each_device_stood`, `a_copy_does_not_go_over_another_history`, `a_source_that_does_not_say_where_its_batches_end_is_not_copied` ([crates/efema/tests/copy.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/copy.rs)), `a_stream_moves_from_a_relay_to_a_bucket_and_back` ([crates/efema/tests/bucket.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/bucket.rs)) |
+| A batch that says where it goes is written there or nowhere, on a relay and in a bucket. | `a_batch_that_says_where_it_goes_lands_there_or_nowhere` ([crates/efema-server/src/store.rs](https://github.com/lacodda/efema/blob/main/crates/efema-server/src/store.rs)), `a_batch_that_says_where_it_goes_lands_there_or_nowhere` ([crates/efema/tests/bucket.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/bucket.rs)), `a_batch_of_a_copy_lands_where_it_was_or_nowhere` ([crates/efema/tests/copy.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/copy.rs)) |
 | A batch whose answer was lost is not written twice when it is sent again - nor when it is sent many times at once. | `an_answer_lost_on_its_way_back_does_not_write_the_batch_twice` ([crates/efema/tests/torn.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/torn.rs)), `the_same_batch_sent_at_once_lands_once` ([crates/efema-server/tests/relay.rs](https://github.com/lacodda/efema/blob/main/crates/efema-server/tests/relay.rs)) |
 | What a device pushed outlives the network going and the app closing, and goes once both are back. | `what_waits_outlives_the_app_closing` ([crates/efema/tests/torn.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/torn.rs)) |
 | A push torn partway resumes where it stopped, and a torn read from the acknowledged cursor. | `a_long_push_resumes_where_it_stopped`, `a_pull_torn_partway_resumes_from_the_acknowledged_cursor` ([crates/efema/tests/torn.rs](https://github.com/lacodda/efema/blob/main/crates/efema/tests/torn.rs)) |

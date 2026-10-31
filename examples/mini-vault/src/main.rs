@@ -14,6 +14,13 @@
 //! ```console
 //! $ mini-vault --bucket https://notes.s3.eu-central-1.amazonaws.com --region eu-central-1 --folder ./notes --state ./notes-state sync
 //! ```
+//!
+//! Moving the folder's stream from a relay to a bucket - each device then
+//! syncs through the bucket with the state it has:
+//!
+//! ```console
+//! $ mini-vault --relay http://127.0.0.1:2451 copy --to-bucket https://notes.s3.eu-central-1.amazonaws.com --to-region eu-central-1
+//! ```
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -21,7 +28,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use efema::{AccessKey, Bucket, Client, Credentials, Epoch, Relay, Secret, State, StreamName, Transport};
+use efema::{AccessKey, Bucket, Client, Credentials, Epoch, Relay, Secret, State, StreamName, Transport, copy};
 use mini_vault::{Summary, Vault};
 
 /// Keep a folder in sync with other devices through an efema relay, or
@@ -43,18 +50,22 @@ struct Cli {
     /// The bucket's region.
     #[arg(long, env = "AWS_REGION")]
     region: Option<String>,
+    /// The prefix in the bucket the stream is under, if not at its root.
+    #[arg(long, env = "MINI_VAULT_PREFIX")]
+    prefix: Option<String>,
     /// The stream the folder syncs through.
     #[arg(long, default_value = "vault")]
     stream: StreamName,
-    /// The folder to keep in sync.
+    /// The folder to keep in sync - for `sync`.
     #[arg(long)]
-    folder: PathBuf,
-    /// Where this device keeps its sync state - outside the folder.
+    folder: Option<PathBuf>,
+    /// Where this device keeps its sync state, outside the folder - for
+    /// `sync` and `doctor`.
     #[arg(long)]
-    state: PathBuf,
-    /// The stream's passphrase.
+    state: Option<PathBuf>,
+    /// The stream's passphrase - for `sync` and `doctor`.
     #[arg(long, env = "MINI_VAULT_PASSPHRASE", hide_env_values = true)]
-    passphrase: String,
+    passphrase: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -69,6 +80,62 @@ enum Command {
     },
     /// Report on this device's sync.
     Doctor,
+    /// Copy the stream to another relay or bucket, every batch at the
+    /// position it has: each device then syncs through the copy with the
+    /// state it has. Run again, it brings over what was written since.
+    Copy {
+        /// The relay to copy to.
+        #[arg(long, env = "MINI_VAULT_TO_RELAY")]
+        to_relay: Option<String>,
+        /// The access key to the space there.
+        #[arg(long, env = "MINI_VAULT_TO_KEY", hide_env_values = true)]
+        to_key: Option<AccessKey>,
+        /// The bucket to copy to, reached with AWS_ACCESS_KEY_ID and
+        /// AWS_SECRET_ACCESS_KEY.
+        #[arg(long, env = "MINI_VAULT_TO_BUCKET")]
+        to_bucket: Option<String>,
+        /// Its region, if not the one --region gives.
+        #[arg(long)]
+        to_region: Option<String>,
+        /// The prefix in it.
+        #[arg(long)]
+        to_prefix: Option<String>,
+    },
+}
+
+/// Where a stream is: a relay, or a bucket.
+enum Remote {
+    Relay(Relay),
+    Bucket(Bucket),
+}
+
+impl Remote {
+    fn new(
+        relay: Option<String>,
+        key: Option<AccessKey>,
+        bucket: Option<String>,
+        region: Option<String>,
+        prefix: Option<String>,
+    ) -> Result<Self> {
+        match (relay, bucket) {
+            (Some(url), None) => {
+                let key = key.context("a relay needs an access key: MINI_VAULT_KEY or --key")?;
+                Ok(Self::Relay(Relay::new(&url, key)?))
+            }
+            (None, Some(url)) => {
+                let region = region.context("a bucket needs its region: AWS_REGION or --region")?;
+                let id = std::env::var("AWS_ACCESS_KEY_ID").context("a bucket needs AWS_ACCESS_KEY_ID")?;
+                let secret = std::env::var("AWS_SECRET_ACCESS_KEY").context("a bucket needs AWS_SECRET_ACCESS_KEY")?;
+                let bucket = Bucket::new(&url, &region, Credentials::new(id, secret))?;
+                Ok(Self::Bucket(match prefix {
+                    Some(prefix) => bucket.within(&prefix)?,
+                    None => bucket,
+                }))
+            }
+            (Some(_), Some(_)) => bail!("a relay or a bucket, not both"),
+            (None, None) => bail!("nowhere to reach the stream: a relay or a bucket"),
+        }
+    }
 }
 
 /// The format of what this app writes - a [`mini_vault::Change`] in CBOR.
@@ -86,39 +153,72 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<()> {
-    std::fs::create_dir_all(&cli.folder).with_context(|| format!("creating {}", cli.folder.display()))?;
-    std::fs::create_dir_all(&cli.state).with_context(|| format!("creating {}", cli.state.display()))?;
-    if inside(&cli.state, &cli.folder)? {
-        bail!("the state directory must be outside the folder it syncs");
+    let from =
+        Remote::new(cli.relay.clone(), cli.key.clone(), cli.bucket.clone(), cli.region.clone(), cli.prefix.clone())
+            .context("--relay (MINI_VAULT_RELAY) or --bucket (MINI_VAULT_BUCKET)")?;
+    if let Command::Copy { to_relay, to_key, to_bucket, to_region, to_prefix } = &cli.command {
+        let to = Remote::new(
+            to_relay.clone(),
+            to_key.clone(),
+            to_bucket.clone(),
+            to_region.clone().or_else(|| cli.region.clone()),
+            to_prefix.clone(),
+        )
+        .context("--to-relay (MINI_VAULT_TO_RELAY) or --to-bucket (MINI_VAULT_TO_BUCKET)")?;
+        return match from {
+            Remote::Relay(from) => copy_to(&from, to, &cli.stream).await,
+            Remote::Bucket(from) => copy_to(&from, to, &cli.stream).await,
+        };
     }
-    match (cli.relay.clone(), cli.bucket.clone()) {
-        (Some(url), None) => {
-            let key = cli.key.clone().context("--relay needs an access key: MINI_VAULT_KEY or --key")?;
-            through(Relay::new(&url, key)?, cli).await
-        }
-        (None, Some(url)) => {
-            let region = cli.region.clone().context("--bucket needs its region: AWS_REGION or --region")?;
-            let id = std::env::var("AWS_ACCESS_KEY_ID").context("--bucket needs AWS_ACCESS_KEY_ID")?;
-            let secret = std::env::var("AWS_SECRET_ACCESS_KEY").context("--bucket needs AWS_SECRET_ACCESS_KEY")?;
-            through(Bucket::new(&url, &region, Credentials::new(id, secret))?, cli).await
-        }
-        (Some(_), Some(_)) => bail!("a relay or a bucket, not both"),
-        (None, None) => bail!("nothing to sync through: --relay (MINI_VAULT_RELAY) or --bucket (MINI_VAULT_BUCKET)"),
+    match from {
+        Remote::Relay(relay) => through(relay, cli).await,
+        Remote::Bucket(bucket) => through(bucket, cli).await,
     }
 }
 
+async fn copy_to<F: Transport>(from: &F, to: Remote, stream: &StreamName) -> Result<()> {
+    let copied = match &to {
+        Remote::Relay(to) => copy(from, to, stream).await?,
+        Remote::Bucket(to) => copy(from, to, stream).await?,
+    };
+    let at = match to {
+        Remote::Relay(to) => to.to_string(),
+        Remote::Bucket(to) => to.to_string(),
+    };
+    println!(
+        "copied {} batch(es), {} entries: {stream} is the same at {at} up to position {}",
+        copied.batches, copied.entries, copied.cursor.seq
+    );
+    Ok(())
+}
+
 async fn through<T: Transport>(transport: T, cli: Cli) -> Result<()> {
-    let state = State::open(cli.state.join("sync.sqlite3"))?;
-    let client =
-        Client::open(transport, &state, cli.stream, EPOCH, Secret::Passphrase(cli.passphrase.as_bytes())).await?;
+    let state_dir = cli.state.context("--state: where this device keeps its sync state")?;
+    let passphrase = cli.passphrase.context("the stream's passphrase: MINI_VAULT_PASSPHRASE or --passphrase")?;
+    std::fs::create_dir_all(&state_dir).with_context(|| format!("creating {}", state_dir.display()))?;
+    let folder = match &cli.command {
+        Command::Sync { .. } => {
+            let folder = cli.folder.clone().context("--folder: the folder to keep in sync")?;
+            std::fs::create_dir_all(&folder).with_context(|| format!("creating {}", folder.display()))?;
+            if inside(&state_dir, &folder)? {
+                bail!("the state directory must be outside the folder it syncs");
+            }
+            Some(folder)
+        }
+        _ => None,
+    };
+    let state = State::open(state_dir.join("sync.sqlite3"))?;
+    let client = Client::open(transport, &state, cli.stream, EPOCH, Secret::Passphrase(passphrase.as_bytes())).await?;
 
     match cli.command {
         Command::Doctor => {
             println!("{}", client.doctor().await);
             Ok(())
         }
+        Command::Copy { .. } => unreachable!("a copy opens no client"),
         Command::Sync { once } => {
-            let mut vault = Vault::open(client, &cli.folder, &cli.state.join("index"))?;
+            let folder = folder.expect("a sync has its folder");
+            let mut vault = Vault::open(client, &folder, &state_dir.join("index"))?;
             loop {
                 match vault.sync().await {
                     Ok(summary) => report(&summary),

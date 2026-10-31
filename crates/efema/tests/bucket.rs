@@ -19,7 +19,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use common::{Device, NEW_PASSPHRASE, PASSPHRASE, contains, data, drain, name, noise};
+use common::{Device, NEW_PASSPHRASE, PASSPHRASE, TestRelay, contains, data, drain, name, noise};
 use efema::wire::{Batch, Entry, ProblemCode, Watch};
 use efema::{Bucket, Compression, Credentials, Cursor, Epoch, Error, Secret, StreamId, StreamName, Transport, chain};
 use lacodda_tear::{Cut, Direction, Tear};
@@ -654,6 +654,50 @@ async fn credentials_that_reach_only_a_prefix_sync_within_it() {
     assert!(!outside.limits().await.unwrap().write);
     let (code, _) = refusal(outside.read(&at.fresh("outside"), None, 10).await);
     assert_eq!(code, ProblemCode::Forbidden);
+}
+
+/// A stream moved from a relay into a bucket, and from there to another
+/// relay: each device reads on from its cursor wherever the stream is, and
+/// a batch that landed before a move is known after it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stream_moves_from_a_relay_to_a_bucket_and_back() {
+    let Some(at) = Settings::from_env() else { return };
+    let stream = at.fresh("moved");
+    let relay = TestRelay::start().await;
+    let (laptop, phone) = (Device::new(), Device::new());
+    let on_laptop = laptop.open(relay.transport(), stream.as_str(), 1).await;
+    on_laptop.push([b"one".as_slice(), b"two"]).await.unwrap();
+    on_laptop.push([b"three".as_slice()]).await.unwrap();
+    let on_phone = phone.open(relay.transport(), stream.as_str(), 1).await;
+    assert_eq!(drain(&on_phone).await.len(), 3);
+
+    let bucket = at.bucket().within("moved").unwrap();
+    let copied = efema::copy(&relay.transport(), &bucket, &stream).await.unwrap();
+    assert_eq!((copied.batches, copied.entries), (3, 4), "the key's entry and two pushes");
+    assert_eq!(
+        bucket.read(&stream, None, 100).await.unwrap(),
+        relay.transport().read(&stream, None, 100).await.unwrap()
+    );
+
+    let on_laptop = laptop.open(bucket.clone(), stream.as_str(), 1).await;
+    on_laptop.push([b"four".as_slice()]).await.unwrap();
+    let on_phone = phone.open(bucket.clone(), stream.as_str(), 1).await;
+    assert_eq!(data(&drain(&on_phone).await), [b"four".as_slice()]);
+
+    let back = TestRelay::start().await;
+    let copied = efema::copy(&bucket, &back.transport(), &stream).await.unwrap();
+    let all = bucket.read(&stream, None, 100).await.unwrap();
+    assert_eq!(copied.cursor, all.cursor().unwrap());
+    // The last batch sent again to where the stream is now, as a device
+    // whose answer the bucket lost sends it: known there, and not written.
+    let last = all.entries.last().unwrap();
+    let again = Batch { epoch: last.epoch, entries: vec![last.data.clone()], stream: Some(all.stream), first: None };
+    let written = back.transport().append(&stream, &again).await.unwrap();
+    assert_eq!((written.first, written.repeated), (last.seq, true), "the relay does not know the bucket's batch");
+    let on_laptop = laptop.open(back.transport(), stream.as_str(), 1).await;
+    on_laptop.push([b"five".as_slice()]).await.unwrap();
+    let on_phone = phone.open(back.transport(), stream.as_str(), 1).await;
+    assert_eq!(data(&drain(&on_phone).await), [b"five".as_slice()]);
 }
 
 /// A service that takes `If-None-Match` and ignores it - every PUT a

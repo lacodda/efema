@@ -28,14 +28,18 @@ The key goes in `MINI_VAULT_KEY` (or `--key`), the passphrase in
 each lets one be revoked without the other.
 
 Through an S3 bucket instead of a relay, `--bucket` and `--region` take the
-place of `--relay`, and the credentials come from `AWS_ACCESS_KEY_ID` and
-`AWS_SECRET_ACCESS_KEY` - the same run through a bucket is on
+place of `--relay` - with `--prefix` for a stream under a prefix of the
+bucket - and the credentials come from `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY`. The same run through a bucket is on
 [Without a server](/efema/guides/without-a-server/#a-folder-through-a-bucket).
 
 Each keeps its folder in sync until stopped: it sends what changed in the
 folder and applies what other devices sent, woken by the relay as soon as
 another device writes. `sync --once` syncs once and exits; `doctor` prints the
-client's report.
+client's report; `copy` copies the folder's stream to another relay or a
+bucket, where each device goes on with the state it has -
+[Moving a stream](/efema/guides/moving-a-stream/#with-the-example-app) shows
+it.
 
 Here the laptop syncs a folder first, the desktop picks it up, and then both
 edit `notes/plan.md` before hearing from each other - the desktop sends first:

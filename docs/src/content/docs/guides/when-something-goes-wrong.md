@@ -155,10 +155,15 @@ does not match its body is refused.
 $ mc mirror old/notes-bucket/vault new/notes-bucket/vault
 ```
 
-### Between a relay and a bucket
+### Between a relay and a bucket - or to a relay you do not run
 
-No tool moves a stream between them. Start a new stream on the other side, and
-push the app's data into it; forget the old one on every device.
+`efema::copy` writes the stream to the other place batch by batch, each at the
+position it has, and the devices go on there with the state they have: copy,
+point the apps at the new place, copy again.
+[Moving a stream](/efema/guides/moving-a-stream/) has the order and what to do
+when a copy stops. It needs no data directory and no key of the stream - only
+access to both places - so it also moves a stream to a relay someone else
+runs, or into another space of the same one.
 
 ## Related
 
@@ -166,5 +171,7 @@ push the app's data into it; forget the old one on every device.
   an app meets it.
 - [Backups](/efema/guides/backups/) - taking a copy of a relay, and restoring
   one.
+- [Moving a stream](/efema/guides/moving-a-stream/) - between relays, spaces
+  and buckets, through the protocol.
 - [Threat model](/efema/concepts/threat-model/) - what a relay that misbehaves
   on purpose can do, beside the accidents here.

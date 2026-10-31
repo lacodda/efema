@@ -159,5 +159,7 @@ and no rate is held (`rate` is 2⁶⁴ - 1). `write` is what the probe found.
 
 - [Without a server](/efema/guides/without-a-server/) - syncing through a
   bucket, and what it costs.
+- [Moving a stream](/efema/guides/moving-a-stream/) - from a relay into a
+  bucket, or back.
 - [Protocol](/efema/reference/protocol/) - the batches, pages and cursors
   stored here.
