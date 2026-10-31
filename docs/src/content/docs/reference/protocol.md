@@ -99,6 +99,21 @@ it.
 The body is read to its end before anything is written: a connection torn
 partway through a batch writes none of it.
 
+### A batch in its place
+
+A batch may say where it goes: `first`, the position its first entry must
+take. It is then written there or nowhere - if the stream's next place is
+another, it is refused with `out_of_place`, and `head` says where the stream
+ends. A batch with `first` 1 that names a `stream` the space does not have
+creates it, with that identity: how a stream is
+[copied](/efema/guides/moving-a-stream/) from elsewhere, each entry at the
+position it had, so the links of its chain and the cursors of its readers hold
+on the copy. A batch the stream already has is answered as a repeat before its
+place is looked at.
+
+A device writing for itself sends no `first`: its batch goes to the next place,
+wherever that is.
+
 ### Sending a batch again
 
 A batch is known by what it holds - its [key](#the-batch-key). A batch the
@@ -127,7 +142,7 @@ key = SHA-256("efema/batch/v1" || epoch: u32 || count: u64 || (length(data): u64
 ```
 
 Integers are big-endian; `count` is the number of entries. The stream the
-batch names is not part of it. A relay keeps the key of every batch it writes,
+batch names, and the place it asks for, are not part of it. A relay keeps the key of every batch it writes,
 so the formula cannot change within a protocol version.
 
 ### batch
@@ -137,6 +152,7 @@ so the formula cannot change within a protocol version.
 | 0 | `epoch` | uint, 32-bit | the epoch the entries are written in |
 | 1 | `entries` | array of byte strings, at least one | the entries, opaque to the relay |
 | 2 | `stream` | identity, optional | the incarnation the writer means to append to |
+| 3 | `first` | uint, optional | the position the batch's first entry must take: written there or refused with `out_of_place` |
 
 ### written
 
@@ -160,6 +176,11 @@ its entries' data passes 8 MiB - but never empty while there is an entry to
 return, however large. When the last entry's position is below `head`, there
 is more: read again with the cursor of that entry.
 
+Each entry says whether it is the last of the batch it was written in, so a
+reader can tell the batches apart - a copy of the stream writes them as they
+were. An entry a relay keeps from before it recorded batches (efema 0.1 to
+0.3) is a batch of its own.
+
 ### page
 
 | Key | Field | Type | Meaning |
@@ -177,6 +198,7 @@ is more: read again with the cursor of that entry.
 | 1 | `epoch` | uint | the epoch it was written in |
 | 2 | `hash` | link | its link in the stream's chain |
 | 3 | `data` | byte string | the bytes as the writer sent them |
+| 4 | `ends_batch` | bool, optional | `true` when the entry is the last of its batch; absent otherwise |
 
 ## Cursors
 
@@ -269,6 +291,7 @@ A refusal has a status and a [problem](#problem) body. Programs act on `code`;
 | 409 | `cursor_ahead` | a cursor past the stream's head; `head` says where the stream ends |
 | 409 | `cursor_diverged` | a cursor whose link the stream does not have at that position |
 | 409 | `epoch_behind` | a batch in an epoch below the stream's; `epoch` says the stream's |
+| 409 | `out_of_place` | a batch whose `first` is not the stream's next place; `head` says where the stream ends |
 | 413 | `too_large` | a body, or an entry, over the limit; `limit` says it |
 | 415 | `unsupported_media_type` | a batch not sent as `application/cbor` |
 | 429 | `rate_limited` | more requests with the key than the relay allows in a minute; `retry` says when to ask again |
@@ -283,7 +306,7 @@ A client keeps codes it does not know: a later relay may add reasons.
 | --- | --- | --- | --- |
 | 0 | `code` | text | the reason, from the table above |
 | 1 | `message` | text | the reason, in a sentence |
-| 2 | `head` | uint, optional | with `cursor_ahead` |
+| 2 | `head` | uint, optional | with `cursor_ahead` and `out_of_place` |
 | 3 | `epoch` | uint, optional | with `epoch_behind` |
 | 4 | `limit` | uint, optional | with `too_large` and `quota_exceeded`, in bytes |
 | 5 | `retry` | uint, optional | with `rate_limited`, in seconds |

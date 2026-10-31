@@ -211,6 +211,10 @@ async fn write(
             problem.limit = Some(quota);
             Failure { status: StatusCode::INSUFFICIENT_STORAGE, problem }
         }
+        AppendError::OutOfPlace { head, .. } => Failure {
+            status: StatusCode::CONFLICT,
+            problem: problem(ProblemCode::OutOfPlace, e.to_string()).with_head(head),
+        },
         AppendError::Sqlite(e) => Failure::internal(&e),
     })?;
 

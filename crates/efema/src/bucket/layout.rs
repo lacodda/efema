@@ -118,11 +118,13 @@ impl Stored {
     /// not copied.
     pub(crate) fn entries_from(&self, from: u64) -> impl Iterator<Item = Entry> + '_ {
         let epoch = self.batch.epoch;
+        let last = self.first + self.batch.entries.len() as u64 - 1;
         self.links().filter(move |(seq, ..)| *seq >= from).map(move |(seq, hash, data)| Entry {
             seq,
             epoch,
             hash,
             data: data.to_vec(),
+            ends_batch: seq == last,
         })
     }
 
@@ -237,13 +239,14 @@ mod tests {
         let stored = Stored {
             first: 1,
             previous,
-            batch: Batch { epoch: Epoch(2), entries: vec![b"a".to_vec(), b"bc".to_vec()], stream: None },
+            batch: Batch { epoch: Epoch(2), entries: vec![b"a".to_vec(), b"bc".to_vec()], stream: None, first: None },
         };
         let entries: Vec<Entry> = stored.entries_from(1).collect();
         assert_eq!(stored.entries_from(2).map(|entry| entry.seq).collect::<Vec<_>>(), [2]);
         let one = chain::link(&previous, 1, Epoch(2), b"a");
-        assert_eq!(entries[0], Entry { seq: 1, epoch: Epoch(2), hash: one, data: b"a".to_vec() });
+        assert_eq!(entries[0], Entry { seq: 1, epoch: Epoch(2), hash: one, data: b"a".to_vec(), ends_batch: false });
         assert_eq!(entries[1].hash, chain::link(&one, 2, Epoch(2), b"bc"));
+        assert!(entries[1].ends_batch, "the last entry of a batch does not say it ends it");
         let summary = stored.summary();
         assert_eq!((summary.first, summary.last, summary.epoch, summary.link), (1, 2, Epoch(2), entries[1].hash));
         assert_eq!(summary.key, stored.batch.key());
@@ -306,7 +309,7 @@ mod tests {
         let stored = Stored {
             first: 3,
             previous: Hash::from_bytes([0xcd; 32]),
-            batch: Batch { epoch: Epoch(1), entries: vec![b"x".to_vec()], stream: None },
+            batch: Batch { epoch: Epoch(1), entries: vec![b"x".to_vec()], stream: None, first: None },
         };
         let mut expected = vec![0xa3, 0x00, 0x03, 0x01, 0x58, 0x20];
         expected.extend_from_slice(&[0xcd; 32]);

@@ -172,7 +172,7 @@ fn chain() {
 #[test]
 fn batch_key() {
     for case in cases("batch-key") {
-        let batch = Batch { epoch: case.epoch(), entries: case.entries(), stream: None };
+        let batch = Batch { epoch: case.epoch(), entries: case.entries(), stream: None, first: None };
         assert_eq!(batch.key(), hash(case.get("key")));
         // The stream a batch names is not part of its key.
         assert_eq!(Batch { stream: Some(StreamId::from_bytes([1; 16])), ..batch.clone() }.key(), batch.key());
@@ -192,7 +192,8 @@ fn cursor() {
 fn cbor_messages() {
     for case in cases("cbor-batch") {
         let stream = case.opt("stream").map(|id| StreamId::from_bytes(hex(id).try_into().expect("an identity")));
-        same_cbor(&case, &Batch { epoch: case.epoch(), entries: case.entries(), stream });
+        let first = case.opt("first").map(|first| first.parse().expect("a position"));
+        same_cbor(&case, &Batch { epoch: case.epoch(), entries: case.entries(), stream, first });
     }
     for case in cases("cbor-written") {
         let written = Written {
@@ -209,9 +210,20 @@ fn cbor_messages() {
             .all("entry")
             .into_iter()
             .map(|entry| {
-                let [seq, epoch, link, data] = entry.split(' ').collect::<Vec<_>>().try_into().expect("four parts");
+                let parts: Vec<&str> = entry.split(' ').collect();
+                let (ends_batch, parts) = match parts.split_last() {
+                    Some((&"end", rest)) => (true, rest),
+                    _ => (false, &parts[..]),
+                };
+                let [seq, epoch, link, data]: [&str; 4] = parts.try_into().expect("four parts, and `end`");
                 let data = if data == "-" { Vec::new() } else { hex(data) };
-                Entry { seq: seq.parse().unwrap(), epoch: Epoch(epoch.parse().unwrap()), hash: hash(link), data }
+                Entry {
+                    seq: seq.parse().unwrap(),
+                    epoch: Epoch(epoch.parse().unwrap()),
+                    hash: hash(link),
+                    data,
+                    ends_batch,
+                }
             })
             .collect();
         same_cbor(&case, &Page { stream: case.stream(), epoch: case.epoch(), head: case.num("head"), entries });
@@ -347,7 +359,7 @@ fn a_bucket() {
         let stored = Stored {
             first: case.num("first"),
             previous: hash(case.get("previous")),
-            batch: Batch { epoch: case.epoch(), entries: case.entries(), stream: None },
+            batch: Batch { epoch: case.epoch(), entries: case.entries(), stream: None, first: None },
         };
         same_cbor(&case, &stored);
         let headers = stored.summary().headers();

@@ -42,7 +42,7 @@ The stream's incarnation, and the layout it is in:
 
 | Key | Field | Type | Meaning |
 | --- | --- | --- | --- |
-| 0 | `id` | identity | the stream's identity: 16 random bytes, drawn by the device that created the record |
+| 0 | `id` | identity | the stream's identity: 16 random bytes, drawn by the device that created the record - or the identity of the stream a copy brought here |
 | 1 | `format` | uint | the layout: `1` |
 
 A client that finds another `format` reads nothing of the stream.
@@ -77,16 +77,20 @@ To append a batch to `<stream>`:
 
 1. Read the record. If the batch names an identity, the record must have it:
    otherwise the batch is refused with `stream_replaced`, or with
-   `stream_not_found` if there is no record. A batch that names none creates
-   the record if there is none - with `If-None-Match: *`; if another device
-   created it first, its identity is the stream's.
+   `stream_not_found` if there is no record - unless the batch's `first` is 1:
+   then it creates the record with that identity, the first batch of a copy.
+   A batch that names none creates the record if there is none, with an
+   identity drawn for it. A record is created with `If-None-Match: *`; if
+   another device created it first, its identity is the stream's.
 2. Find the head: the newest batch is the first key of a listing of
    `<stream>/<id>/b/`, its last position and link in its metadata. A stream
    with no batch has head 0, the genesis link and epoch 0.
 3. List `<stream>/<id>/o/<batch key>/`. If a batch at one of the positions
    offered there has this batch key, the batch is in the stream: answer with
    where it landed, as `repeated`.
-4. A batch in an epoch below the head's is refused with `epoch_behind`.
+4. A batch whose `first` is not `head + 1` is refused with `out_of_place`, and
+   `head`. A batch in an epoch below the head's is refused with
+   `epoch_behind`.
 5. Write the offer `<stream>/<id>/o/<batch key>/<head + 1>`.
 6. Create the batch at `head + 1` with `If-None-Match: *`. Created: answer
    with its positions. Refused with `412`: another batch has the place - read

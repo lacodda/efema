@@ -268,13 +268,19 @@ def build():
     v.section(
         "cbor-batch",
         "epoch: a number. entry: the entries. stream: the identity, when the batch names one.",
-        "cbor: the batch.",
+        "first: the position the batch must start at, when it says. cbor: the batch.",
     )
-    for epoch, entries, stream in ((1, [b"hello", b""], None), (7, [b"x"], STREAM)):
+    for epoch, entries, stream, first in (
+        (1, [b"hello", b""], None, None),
+        (7, [b"x"], STREAM, None),
+        (2, [b"copied", b"in place"], STREAM, 300),
+    ):
         fields = [("epoch", epoch), *(("entry", e) for e in entries)]
         if stream:
             fields.append(("stream", stream))
-        v.case(*fields, ("cbor", cbor({0: epoch, 1: entries, 2: stream})))
+        if first:
+            fields.append(("first", first))
+        v.case(*fields, ("cbor", cbor({0: epoch, 1: entries, 2: stream, 3: first})))
 
     v.section(
         "cbor-written",
@@ -290,15 +296,19 @@ def build():
     v.section(
         "cbor-page",
         "stream: an identity. epoch, head: numbers. entry: each entry as `seq epoch hash data`,",
-        "the data `-` for none. cbor: the page.",
+        "the data `-` for none, then `end` when the entry is the last of its batch. cbor: the page.",
     )
-    entries = [(seq, epoch, links[i], data) for i, (seq, epoch, data) in enumerate(chain[:2])]
+    # The first two entries of the chain, written as one batch.
+    entries = [(seq, epoch, links[i], data, seq == 2) for i, (seq, epoch, data) in enumerate(chain[:2])]
     v.case(
         ("stream", STREAM),
         ("epoch", 1),
         ("head", 2),
-        *(("entry", f"{s} {e} {h.hex()} {d.hex() or '-'}") for s, e, h, d in entries),
-        ("cbor", cbor({0: STREAM, 1: 1, 2: 2, 3: [{0: s, 1: e, 2: h, 3: d} for s, e, h, d in entries]})),
+        *(("entry", f"{s} {e} {h.hex()} {d.hex() or '-'}" + (" end" if end else "")) for s, e, h, d, end in entries),
+        (
+            "cbor",
+            cbor({0: STREAM, 1: 1, 2: 2, 3: [{0: s, 1: e, 2: h, 3: d, 4: end or None} for s, e, h, d, end in entries]}),
+        ),
     )
 
     v.section(
@@ -339,6 +349,7 @@ def build():
         ("too_large", "the batch is larger than the relay takes", 4, 16777216),
         ("rate_limited", "too many requests with this key", 5, 12),
         ("quota_exceeded", "the space is full", 4, 8589934592),
+        ("out_of_place", "the batch is to start elsewhere", 2, 299),
         ("not_found", "no such path", None, None),
     ]
     extra = {2: "head", 3: "epoch", 4: "limit", 5: "retry"}

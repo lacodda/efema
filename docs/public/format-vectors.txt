@@ -90,7 +90,7 @@ text = 2.30313233343536373839616263646566.52184c39fa509a68901c71d8d25c632be63c5c
 
 [cbor-batch]
 # epoch: a number. entry: the entries. stream: the identity, when the batch names one.
-# cbor: the batch.
+# first: the position the batch must start at, when it says. cbor: the batch.
 
 epoch = 1
 entry = 68656c6c6f
@@ -101,6 +101,13 @@ epoch = 7
 entry = 78
 stream = 30313233343536373839616263646566
 cbor = a3000701814178025030313233343536373839616263646566
+
+epoch = 2
+entry = 636f70696564
+entry = 696e20706c616365
+stream = 30313233343536373839616263646566
+first = 300
+cbor = a40002018246636f7069656448696e20706c6163650250303132333435363738396162636465660319012c
 
 [cbor-written]
 # stream: an identity. epoch, first, last: numbers. repeated: present, as true, when the
@@ -121,14 +128,14 @@ cbor = a500503031323334353637383961626364656601010201030204f5
 
 [cbor-page]
 # stream: an identity. epoch, head: numbers. entry: each entry as `seq epoch hash data`,
-# the data `-` for none. cbor: the page.
+# the data `-` for none, then `end` when the entry is the last of its batch. cbor: the page.
 
 stream = 30313233343536373839616263646566
 epoch = 1
 head = 2
 entry = 1 1 1338b06d59cf4930e7d0d151251285b1f1b2f824f29dff4b036d7f38f0c42a20 68656c6c6f
-entry = 2 1 52184c39fa509a68901c71d8d25c632be63c5c7df90eff0ac3bc9c5f810ed690 -
-cbor = a4005030313233343536373839616263646566010102020382a4000101010258201338b06d59cf4930e7d0d151251285b1f1b2f824f29dff4b036d7f38f0c42a20034568656c6c6fa40002010102582052184c39fa509a68901c71d8d25c632be63c5c7df90eff0ac3bc9c5f810ed6900340
+entry = 2 1 52184c39fa509a68901c71d8d25c632be63c5c7df90eff0ac3bc9c5f810ed690 - end
+cbor = a4005030313233343536373839616263646566010102020382a4000101010258201338b06d59cf4930e7d0d151251285b1f1b2f824f29dff4b036d7f38f0c42a20034568656c6c6fa50002010102582052184c39fa509a68901c71d8d25c632be63c5c7df90eff0ac3bc9c5f810ed690034004f5
 
 [cbor-heads]
 # head: each stream as `name id head`, the id `-` when no stream has the name. cbor: the
@@ -196,6 +203,11 @@ code = quota_exceeded
 message = the space is full
 limit = 8589934592
 cbor = a3006e71756f74615f657863656564656401717468652073706163652069732066756c6c041b0000000200000000
+
+code = out_of_place
+message = the batch is to start elsewhere
+head = 299
+cbor = a3006c6f75745f6f665f706c61636501781f74686520626174636820697320746f20737461727420656c736577686572650219012b
 
 code = not_found
 message = no such path

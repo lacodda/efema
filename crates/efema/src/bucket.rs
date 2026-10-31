@@ -433,15 +433,10 @@ impl Bucket {
         Ok(Some(record.id))
     }
 
-    /// Makes `stream` an incarnation - or finds the one another device made
-    /// first.
-    async fn create_record(&self, stream: &StreamName) -> Result<StreamId, TransportError> {
-        let mut bytes = [0; 16];
-        getrandom::fill(&mut bytes).map_err(|e| TransportError::Unreachable {
-            at: "the system's random number generator".into(),
-            source: Box::new(e),
-        })?;
-        let record = Record { id: StreamId::from_bytes(bytes), format: layout::FORMAT };
+    /// Makes `stream` the incarnation `id` - or finds the one another
+    /// device made first.
+    async fn create_record(&self, stream: &StreamName, id: StreamId) -> Result<StreamId, TransportError> {
+        let record = Record { id, format: layout::FORMAT };
         match self.create(&layout::record(stream), wire::encode(&record), Vec::new()).await? {
             Created::Made => Ok(record.id),
             Created::Taken => self
@@ -642,13 +637,31 @@ impl Transport for Bucket {
                 ));
             }
             (Some(id), _) => id,
+            // A copy's first batch: the stream it copies, under its identity.
+            (None, Some(expected)) if batch.first == Some(1) => {
+                let id = self.create_record(stream, expected).await?;
+                if id != expected {
+                    return Err(self.refusal(
+                        ProblemCode::StreamReplaced,
+                        format!("the batch expects stream {expected}, and {stream} is now stream {id}"),
+                    ));
+                }
+                id
+            }
             (None, Some(expected)) => {
                 return Err(self.refusal(
                     ProblemCode::StreamNotFound,
                     format!("there is no stream named {stream}, and the batch expects stream {expected}"),
                 ));
             }
-            (None, None) => self.create_record(stream).await?,
+            (None, None) => {
+                let mut bytes = [0; 16];
+                getrandom::fill(&mut bytes).map_err(|e| TransportError::Unreachable {
+                    at: "the system's random number generator".into(),
+                    source: Box::new(e),
+                })?;
+                self.create_record(stream, StreamId::from_bytes(bytes)).await?
+            }
         };
         // What a bucket takes never changes, so a batch it would refuse now
         // it refused when first sent: unlike on a relay, the size can be
@@ -679,7 +692,7 @@ impl Transport for Bucket {
         let mut stored = Stored {
             first: 0,
             previous: chain::genesis(&id),
-            batch: Batch { epoch: batch.epoch, entries: batch.entries.clone(), stream: None },
+            batch: Batch { epoch: batch.epoch, entries: batch.entries.clone(), stream: None, first: None },
         };
         let mut newest = self.newest(stream, id).await?;
         for _ in 0..PLACES {
@@ -694,6 +707,16 @@ impl Transport for Bucket {
             }
             let (after, epoch, previous) =
                 newest.map_or((0, Epoch(0), chain::genesis(&id)), |n| (n.last, n.epoch, n.link));
+            if let Some(first) = batch.first
+                && first != after + 1
+            {
+                let mut refusal = problem(
+                    ProblemCode::OutOfPlace,
+                    format!("the batch is to start at position {first}, and the stream's next place is {}", after + 1),
+                );
+                refusal.head = Some(after);
+                return Err(TransportError::Refused { at: self.base(), problem: Box::new(refusal) });
+            }
             if batch.epoch < epoch {
                 let mut refusal = problem(
                     ProblemCode::EpochBehind,

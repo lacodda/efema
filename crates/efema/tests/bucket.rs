@@ -90,7 +90,7 @@ impl Settings {
 }
 
 fn batch(entries: &[&[u8]], stream: Option<StreamId>) -> Batch {
-    Batch { epoch: Epoch(1), entries: entries.iter().map(|e| e.to_vec()).collect(), stream }
+    Batch { epoch: Epoch(1), entries: entries.iter().map(|e| e.to_vec()).collect(), stream, first: None }
 }
 
 /// Every entry of `stream`, read page by page by a device that knows nothing
@@ -176,7 +176,10 @@ async fn writers_at_once_land_whole_batches_in_one_order() {
                 let entries: Vec<Vec<u8>> =
                     (0..=(writer + number) % 4).map(|e| format!("w{writer} b{number} e{e}").into_bytes()).collect();
                 let landed = bucket
-                    .append(&stream, &Batch { epoch: Epoch(1), entries: entries.clone(), stream: Some(id) })
+                    .append(
+                        &stream,
+                        &Batch { epoch: Epoch(1), entries: entries.clone(), stream: Some(id), first: None },
+                    )
                     .await
                     .unwrap();
                 assert!(!landed.repeated);
@@ -555,6 +558,38 @@ async fn credentials_the_bucket_does_not_take_are_refused() {
     assert_eq!(code, ProblemCode::Unauthorized);
     let refused = Device::new().try_open(wrong, at.fresh("wrong").as_str(), 1, Secret::Passphrase(PASSPHRASE)).await;
     assert!(matches!(refused, Err(Error::Unauthorized { .. })), "{refused:?}");
+}
+
+/// A batch that says which position it starts at lands there or nowhere,
+/// and the first batch of a copy makes the stream under the identity it
+/// names - as on a relay.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_batch_that_says_where_it_goes_lands_there_or_nowhere() {
+    let Some(at) = Settings::from_env() else { return };
+    let (stream, bucket) = (at.fresh("placed"), at.bucket());
+    let one = batch(&[b"a", b"b"], None);
+    let id = bucket.append(&stream, &one).await.unwrap().stream;
+    let placed = |first| Batch { first: Some(first), ..batch(&[b"c"], Some(id)) };
+    for wrong in [1, 2, 4] {
+        let (code, problem) = refusal(bucket.append(&stream, &placed(wrong)).await);
+        assert_eq!((code, problem.head), (ProblemCode::OutOfPlace, Some(2)), "at {wrong}");
+    }
+    let written = bucket.append(&stream, &placed(3)).await.unwrap();
+    assert_eq!((written.first, written.repeated), (3, false));
+    let again = bucket.append(&stream, &Batch { first: Some(9), stream: Some(id), ..one }).await.unwrap();
+    assert_eq!((again.first, again.repeated), (1, true), "a batch the stream has is answered where it is");
+
+    let copy = at.fresh("placed-copy");
+    let ours = StreamId::from_bytes([0x42; 16]);
+    for wrong in [None, Some(2)] {
+        let (code, _) = refusal(bucket.append(&copy, &Batch { first: wrong, ..batch(&[b"x"], Some(ours)) }).await);
+        assert_eq!(code, ProblemCode::StreamNotFound, "a batch at {wrong:?} made the stream");
+    }
+    let made = bucket.append(&copy, &Batch { first: Some(1), ..batch(&[b"x"], Some(ours)) }).await.unwrap();
+    assert_eq!((made.stream, made.first), (ours, 1));
+    let other = StreamId::from_bytes([0x43; 16]);
+    let (code, _) = refusal(bucket.append(&copy, &Batch { first: Some(1), ..batch(&[b"y"], Some(other)) }).await);
+    assert_eq!(code, ProblemCode::StreamReplaced);
 }
 
 /// A service that takes `If-None-Match` and ignores it - every PUT a

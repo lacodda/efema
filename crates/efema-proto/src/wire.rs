@@ -32,6 +32,10 @@ use crate::{Cursor, Epoch, Hash, StreamId, StreamName};
 /// says where it landed the first time. So a writer whose answer was lost on
 /// the way back sends the same batch again, byte for byte, and the stream
 /// holds it once.
+///
+/// A batch may also say where it goes - [`first`](Batch::first) - and is then
+/// written there or nowhere: how a stream is copied from one relay to
+/// another with every entry at the position it had.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 #[cbor(map)]
 pub struct Batch {
@@ -52,6 +56,15 @@ pub struct Batch {
     /// does: how a stream's first batch is written.
     #[n(2)]
     pub stream: Option<StreamId>,
+    /// The position the batch's first entry must take. With it, the relay
+    /// writes the batch only if the stream's next place is there, and
+    /// refuses it otherwise (`out_of_place`, with the stream's last position
+    /// as `head`). With 1 and an identity in `stream`, a name no stream has
+    /// yet is given a stream of that identity - a copy of a stream from
+    /// elsewhere, whose cursors hold on the copy. Without it, the batch goes
+    /// to the next place, wherever that is.
+    #[n(3)]
+    pub first: Option<u64>,
 }
 
 /// Domain separation for a batch's key: no other SHA-256 input in efema
@@ -64,8 +77,9 @@ impl Batch {
     /// same bytes - moving a byte from one entry to the next changes the
     /// input rather than reshuffling it.
     ///
-    /// The stream the batch names is not in it: a batch is the same batch
-    /// whether its first sending created the stream or named it.
+    /// The stream the batch names and the place it asks for are not in
+    /// it: a batch is the same batch whether its first sending created the
+    /// stream or named it, and wherever it was sent to go.
     ///
     /// ```text
     /// key = SHA-256("efema/batch/v1" || epoch: u32 || count: u64 || (length(data): u64 || data) for each entry)
@@ -156,6 +170,13 @@ pub struct Entry {
     #[n(3)]
     #[cbor(with = "minicbor::bytes")]
     pub data: Vec<u8>,
+    /// Whether the entry is the last of the batch it was written in - so a
+    /// reader can tell the batches apart, and copy a stream batch by batch.
+    /// An entry a relay keeps from before it recorded batches is a batch of
+    /// its own. On the wire only when true.
+    #[n(4)]
+    #[cbor(skip_if = "is_false")]
+    pub ends_batch: bool,
 }
 
 impl Entry {
@@ -326,7 +347,7 @@ pub struct Problem {
     /// What went wrong, in a sentence.
     #[n(1)]
     pub message: String,
-    /// The stream's last position - with `cursor_ahead`.
+    /// The stream's last position - with `cursor_ahead` and `out_of_place`.
     #[n(2)]
     pub head: Option<u64>,
     /// The stream's epoch - with `epoch_behind`.
@@ -384,6 +405,9 @@ pub enum ProblemCode {
     RateLimited,
     /// The batch would take the space past the bytes it may hold.
     QuotaExceeded,
+    /// The batch says which position it starts at, and the stream's next
+    /// place is not there.
+    OutOfPlace,
     /// No such endpoint.
     NotFound,
     /// The endpoint exists, but not for this method.
@@ -397,7 +421,7 @@ pub enum ProblemCode {
 impl ProblemCode {
     /// Every code this version of the protocol defines - all but
     /// [`ProblemCode::Other`].
-    pub const KNOWN: [ProblemCode; 16] = [
+    pub const KNOWN: [ProblemCode; 17] = [
         Self::BadRequest,
         Self::StreamNotFound,
         Self::StreamReplaced,
@@ -411,6 +435,7 @@ impl ProblemCode {
         Self::HttpsRequired,
         Self::RateLimited,
         Self::QuotaExceeded,
+        Self::OutOfPlace,
         Self::NotFound,
         Self::MethodNotAllowed,
         Self::Internal,
@@ -432,6 +457,7 @@ impl ProblemCode {
             Self::HttpsRequired => "https_required",
             Self::RateLimited => "rate_limited",
             Self::QuotaExceeded => "quota_exceeded",
+            Self::OutOfPlace => "out_of_place",
             Self::NotFound => "not_found",
             Self::MethodNotAllowed => "method_not_allowed",
             Self::Internal => "internal",
@@ -456,6 +482,7 @@ impl ProblemCode {
             "https_required" => Self::HttpsRequired,
             "rate_limited" => Self::RateLimited,
             "quota_exceeded" => Self::QuotaExceeded,
+            "out_of_place" => Self::OutOfPlace,
             "not_found" => Self::NotFound,
             "method_not_allowed" => Self::MethodNotAllowed,
             "internal" => Self::Internal,
@@ -562,6 +589,7 @@ mod tests {
             epoch: Epoch(3),
             entries: vec![b"one".to_vec(), Vec::new(), vec![0xff; 300]],
             stream: Some(stream()),
+            first: Some(7),
         };
         assert_eq!(decode::<Batch>(&encode(&batch)).unwrap(), batch);
     }
@@ -570,18 +598,42 @@ mod tests {
     fn entry_data_travels_as_byte_strings() {
         // 0xa2 map(2) · 0x00 0x01 epoch 1 · 0x01 0x82 entries: array(2) ·
         // 0x42 "hi" as bytes(2) · 0x40 empty bytes
-        let batch = Batch { epoch: Epoch(1), entries: vec![b"hi".to_vec(), Vec::new()], stream: None };
+        let batch = Batch { epoch: Epoch(1), entries: vec![b"hi".to_vec(), Vec::new()], stream: None, first: None };
         assert_eq!(encode(&batch), [0xa2, 0x00, 0x01, 0x01, 0x82, 0x42, b'h', b'i', 0x40]);
     }
 
     #[test]
     fn a_batch_names_the_stream_it_expects_as_an_identity() {
         // {0: 1, 1: [h'78'], 2: h'30..66'}: key 2 is a 16-byte string.
-        let batch = Batch { epoch: Epoch(1), entries: vec![b"x".to_vec()], stream: Some(stream()) };
+        let batch = Batch { epoch: Epoch(1), entries: vec![b"x".to_vec()], stream: Some(stream()), first: None };
         let mut expected = vec![0xa3, 0x00, 0x01, 0x01, 0x81, 0x41, b'x', 0x02, 0x50];
         expected.extend_from_slice(b"0123456789abcdef");
         assert_eq!(encode(&batch), expected);
         assert_eq!(decode::<Batch>(&expected).unwrap(), batch);
+    }
+
+    #[test]
+    fn a_batch_says_where_it_goes_only_when_it_asks_for_a_place() {
+        // {0: 1, 1: [h'78'], 3: 300}: key 3, the position, as an unsigned
+        // integer.
+        let batch = Batch { epoch: Epoch(1), entries: vec![b"x".to_vec()], stream: None, first: Some(300) };
+        let expected = [0xa3, 0x00, 0x01, 0x01, 0x81, 0x41, b'x', 0x03, 0x19, 0x01, 0x2c];
+        assert_eq!(encode(&batch), expected);
+        assert_eq!(decode::<Batch>(&expected).unwrap(), batch);
+    }
+
+    #[test]
+    fn an_entry_says_it_ends_its_batch_only_when_it_does() {
+        let entry =
+            Entry { seq: 1, epoch: Epoch(1), hash: Hash::from_bytes([7; 32]), data: b"x".to_vec(), ends_batch: false };
+        let inside = encode(&entry);
+        assert_eq!(inside[0], 0xa4, "four keys, no fifth");
+        assert_eq!(decode::<Entry>(&inside).unwrap(), entry);
+        let last = Entry { ends_batch: true, ..entry };
+        let bytes = encode(&last);
+        assert_eq!(bytes[0], 0xa5);
+        assert_eq!(&bytes[bytes.len() - 2..], [0x04, 0xf5], "key 4, true");
+        assert_eq!(decode::<Entry>(&bytes).unwrap(), last);
     }
 
     // Frozen values, computed outside Rust (Python's hashlib over the same
@@ -594,6 +646,7 @@ mod tests {
             epoch: Epoch(epoch),
             entries: entries.iter().map(|e| e.to_vec()).collect(),
             stream: None,
+            first: None,
         };
         let key = batch(1, &[b"hello", b""]).key();
         assert_eq!(key.to_string(), "4ba9b77af7cf7cca7343bb1a0a429ea31dab2b745ca3999908c1be168e8a98fc");
@@ -609,6 +662,8 @@ mod tests {
         );
         let named = Batch { stream: Some(stream()), ..batch(1, &[b"hello", b""]) };
         assert_eq!(named.key(), key, "the stream a batch names is not part of it");
+        let placed = Batch { first: Some(12), ..batch(1, &[b"hello", b""]) };
+        assert_eq!(placed.key(), key, "the place a batch asks for is not part of it");
     }
 
     #[test]
@@ -627,7 +682,7 @@ mod tests {
 
     #[test]
     fn trailing_bytes_are_refused() {
-        let mut bytes = encode(&Batch { epoch: Epoch(1), entries: vec![b"x".to_vec()], stream: None });
+        let mut bytes = encode(&Batch { epoch: Epoch(1), entries: vec![b"x".to_vec()], stream: None, first: None });
         bytes.push(0x00);
         assert!(decode::<Batch>(&bytes).is_err());
     }
@@ -659,7 +714,13 @@ mod tests {
 
     #[test]
     fn a_page_names_the_cursor_after_its_last_entry() {
-        let entry = |seq: u64| Entry { seq, epoch: Epoch(1), hash: Hash::from_bytes([seq as u8; 32]), data: vec![] };
+        let entry = |seq: u64| Entry {
+            seq,
+            epoch: Epoch(1),
+            hash: Hash::from_bytes([seq as u8; 32]),
+            data: vec![],
+            ends_batch: seq == 5,
+        };
         let page = Page { stream: stream(), epoch: Epoch(1), head: 9, entries: vec![entry(4), entry(5)] };
         assert_eq!(page.cursor(), Some(Cursor { stream: stream(), seq: 5, hash: Hash::from_bytes([5; 32]) }));
         assert_eq!(Page { entries: vec![], ..page.clone() }.cursor(), None);
@@ -707,6 +768,7 @@ mod tests {
                 | ProblemCode::HttpsRequired
                 | ProblemCode::RateLimited
                 | ProblemCode::QuotaExceeded
+                | ProblemCode::OutOfPlace
                 | ProblemCode::NotFound
                 | ProblemCode::MethodNotAllowed
                 | ProblemCode::Internal => {}

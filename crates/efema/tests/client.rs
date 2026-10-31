@@ -309,7 +309,12 @@ async fn a_part_newer_than_this_release_stops_a_device_in_front_of_it() {
                 [lock.clone(), seal].concat()
             }
         };
-        let batch = efema::wire::Batch { epoch: Epoch(1), entries: vec![newer], stream: Some(on_writer.stream_id()) };
+        let batch = efema::wire::Batch {
+            epoch: Epoch(1),
+            entries: vec![newer],
+            stream: Some(on_writer.stream_id()),
+            first: None,
+        };
         relay.transport().append(&name(stream), &batch).await.unwrap();
 
         let reader = Device::new();
@@ -503,7 +508,8 @@ async fn an_entry_no_client_wrote_is_refused_not_skipped() {
     client.push([b"sealed"]).await.unwrap();
     // Something that speaks the protocol but does not seal writes into the
     // stream: the relay takes it, the client does not.
-    let plain = efema::wire::Batch { epoch: Epoch(1), entries: vec![b"plain text".to_vec()], stream: None };
+    let plain =
+        efema::wire::Batch { epoch: Epoch(1), entries: vec![b"plain text".to_vec()], stream: None, first: None };
     relay.transport().append(&name("notes"), &plain).await.unwrap();
 
     let pulled = client.pull().await.unwrap();
@@ -593,7 +599,7 @@ async fn a_lock_the_key_did_not_seal_moves_nothing() {
     // does not take the stream back to the old passphrase. Twice, in one
     // batch: alone, it would be the stream's first batch over again, which
     // the relay knows and does not write twice.
-    let write = |entries: Vec<Vec<u8>>| efema::wire::Batch { epoch: Epoch(1), entries, stream: None };
+    let write = |entries: Vec<Vec<u8>>| efema::wire::Batch { epoch: Epoch(1), entries, stream: None, first: None };
     let replayed = relay.transport().append(&name("notes"), &write(vec![first.clone(), first])).await.unwrap();
     assert!(!replayed.repeated);
     let reader = Device::new();

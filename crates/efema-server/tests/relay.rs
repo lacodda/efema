@@ -158,7 +158,7 @@ async fn a_batch_torn_on_its_way_in_writes_nothing() {
     let tear = lacodda_tear::Tear::start(relay.addr).await.unwrap();
     // Through the headers and into the body.
     tear.cut(lacodda_tear::Cut::Up(1_000));
-    let batch = Batch { epoch: Epoch(1), entries: vec![vec![7u8; 50_000]], stream: None };
+    let batch = Batch { epoch: Epoch(1), entries: vec![vec![7u8; 50_000]], stream: None, first: None };
     let torn = relay
         .client
         .post(format!("http://{}/v1/streams/s/entries", tear.addr()))
@@ -315,6 +315,27 @@ async fn a_writer_that_names_its_stream_writes_only_into_that_one() {
     assert_eq!(relay.read("notes", None, None).await.unwrap().head, 1, "nothing refused was written");
 }
 
+/// Over HTTP: a batch that says where it starts lands there, or is refused
+/// with the stream's last position; a copy's first batch makes the stream it
+/// names, and the page says where each batch ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_batch_lands_where_it_says_or_is_refused_with_the_head() {
+    let relay = TestRelay::start().await;
+    let first = relay.write("notes", 1, &[b"a", b"b"]).await.unwrap();
+    let placed = |at: u64, stream| Batch { epoch: Epoch(1), entries: vec![b"c".to_vec()], stream, first: Some(at) };
+    let refused = relay.write_raw("notes", wire::encode(&placed(5, Some(first.stream)))).await.unwrap_err();
+    assert_eq!((refused.status, refused.problem.code), (StatusCode::CONFLICT, ProblemCode::OutOfPlace));
+    assert_eq!(refused.problem.head, Some(2));
+    let written = relay.write_raw("notes", wire::encode(&placed(3, Some(first.stream)))).await.unwrap();
+    assert_eq!((written.first, written.last), (3, 3));
+
+    let copied = relay.write_raw("copy", wire::encode(&placed(1, Some(first.stream)))).await.unwrap();
+    assert_eq!(copied.stream, first.stream);
+    let page = relay.read("notes", None, None).await.unwrap();
+    let ends: Vec<bool> = page.entries.iter().map(|entry| entry.ends_batch).collect();
+    assert_eq!(ends, [false, true, true]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn malformed_requests_are_refused_and_say_why() {
     let relay = TestRelay::start().await;
@@ -327,7 +348,8 @@ async fn malformed_requests_are_refused_and_say_why() {
     assert_eq!(code(relay.write("notes", 1, &[]).await), bad, "an empty batch");
     assert_eq!(code(relay.write("Notes", 1, &[b"x"]).await), bad, "an invalid name");
     assert_eq!(code(relay.write_raw("notes", b"not cbor".to_vec()).await), bad, "a body that is not CBOR");
-    let mut trailing = wire::encode(&Batch { epoch: Epoch(1), entries: vec![b"x".to_vec()], stream: None });
+    let mut trailing =
+        wire::encode(&Batch { epoch: Epoch(1), entries: vec![b"x".to_vec()], stream: None, first: None });
     trailing.push(0);
     assert_eq!(code(relay.write_raw("notes", trailing).await), bad, "trailing bytes");
 
@@ -343,7 +365,7 @@ async fn malformed_requests_are_refused_and_say_why() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_batch_is_sent_as_cbor() {
     let relay = TestRelay::start().await;
-    let body = wire::encode(&Batch { epoch: Epoch(1), entries: vec![b"x".to_vec()], stream: None });
+    let body = wire::encode(&Batch { epoch: Epoch(1), entries: vec![b"x".to_vec()], stream: None, first: None });
     let response = relay
         .client
         .post(relay.url("/v1/streams/notes/entries"))

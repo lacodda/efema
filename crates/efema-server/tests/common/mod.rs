@@ -144,7 +144,12 @@ impl Speaker {
     }
 
     pub async fn write(&self, stream: &str, epoch: u32, entries: &[&[u8]]) -> Result<Written, Refused> {
-        let batch = Batch { epoch: Epoch(epoch), entries: entries.iter().map(|e| e.to_vec()).collect(), stream: None };
+        let batch = Batch {
+            epoch: Epoch(epoch),
+            entries: entries.iter().map(|e| e.to_vec()).collect(),
+            stream: None,
+            first: None,
+        };
         self.write_raw(stream, wire::encode(&batch)).await
     }
 
@@ -156,8 +161,12 @@ impl Speaker {
         epoch: u32,
         entries: &[&[u8]],
     ) -> Result<Written, Refused> {
-        let batch =
-            Batch { epoch: Epoch(epoch), entries: entries.iter().map(|e| e.to_vec()).collect(), stream: Some(expect) };
+        let batch = Batch {
+            epoch: Epoch(epoch),
+            entries: entries.iter().map(|e| e.to_vec()).collect(),
+            stream: Some(expect),
+            first: None,
+        };
         self.write_raw(stream, wire::encode(&batch)).await
     }
 

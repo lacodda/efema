@@ -114,7 +114,8 @@ async fn write(served: &Served, stream: &str, entries: &[&[u8]]) -> Written {
 }
 
 async fn try_write(base: &str, key: &str, stream: &str, entries: &[&[u8]]) -> Result<Written, common::Refused> {
-    let batch = Batch { epoch: Epoch(1), entries: entries.iter().map(|e| e.to_vec()).collect(), stream: None };
+    let batch =
+        Batch { epoch: Epoch(1), entries: entries.iter().map(|e| e.to_vec()).collect(), stream: None, first: None };
     let response = reqwest::Client::new()
         .post(format!("{base}/v1/streams/{stream}/entries"))
         .header("content-type", MEDIA_TYPE)

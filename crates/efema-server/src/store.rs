@@ -17,6 +17,9 @@
 //!   every batch before it - and, once recorded, stays as it is;
 //! - a stream belongs to one space, and its name is its own within it.
 //!
+//! A stream's identity is not unique on a relay: a stream copied from
+//! elsewhere keeps the one it had, and may be copied twice.
+//!
 //! Writes go through one connection, one transaction per batch; reads use
 //! their own connections and see a consistent snapshot (WAL), so a reader
 //! never waits for a writer and never sees half a batch.
@@ -38,7 +41,7 @@ pub const DATABASE_FILE: &str = "relay.sqlite3";
 pub const DEFAULT_SPACE: &str = "default";
 
 /// The schema version this build writes and reads (`PRAGMA user_version`).
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// Migrations, in order: index `i` takes the database from version `i` to
 /// `i + 1`. An applied migration is never edited - a change is a new one.
@@ -225,6 +228,74 @@ BEGIN
     SELECT RAISE(ABORT, 'a stream cannot move to another space or name');
 END;
 "#,
+    r#"
+-- A stream copied from elsewhere keeps its identity, so two streams of one
+-- relay may share one: a copy in another space, or under another name. The
+-- name stays unique within its space. The table is rebuilt without the
+-- uniqueness of the identity, keys kept; the triggers that read it go and
+-- come back unchanged around it.
+DROP TRIGGER entries_follow_the_head;
+DROP TRIGGER entries_move_the_head;
+DROP TRIGGER batches_end_at_the_head;
+DROP TRIGGER streams_stay_in_their_space;
+
+CREATE TABLE streams_by_name (
+    key        INTEGER PRIMARY KEY,
+    space      INTEGER NOT NULL REFERENCES spaces (key),
+    name       TEXT    NOT NULL,
+    id         BLOB    NOT NULL CHECK (length(id) = 16),
+    epoch      INTEGER NOT NULL CHECK (epoch BETWEEN 0 AND 4294967295),
+    head       INTEGER NOT NULL DEFAULT 0 CHECK (head >= 0),
+    head_hash  BLOB    NOT NULL CHECK (length(head_hash) = 32),
+    bytes      INTEGER NOT NULL DEFAULT 0 CHECK (bytes >= 0),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (space, name)
+) STRICT;
+
+INSERT INTO streams_by_name (key, space, name, id, epoch, head, head_hash, bytes, created_at, updated_at)
+SELECT key, space, name, id, epoch, head, head_hash, bytes, created_at, updated_at
+FROM streams;
+
+DROP TABLE streams;
+ALTER TABLE streams_by_name RENAME TO streams;
+
+CREATE TRIGGER entries_follow_the_head
+BEFORE INSERT ON entries
+BEGIN
+    SELECT RAISE(ABORT, 'an entry must take the position right after the head')
+    WHERE NEW.seq <> (SELECT head FROM streams WHERE key = NEW.stream) + 1;
+    SELECT RAISE(ABORT, 'an entry cannot be written in an epoch older than its stream')
+    WHERE NEW.epoch < (SELECT epoch FROM streams WHERE key = NEW.stream);
+END;
+
+CREATE TRIGGER entries_move_the_head
+AFTER INSERT ON entries
+BEGIN
+    UPDATE streams
+    SET head = NEW.seq, head_hash = NEW.hash, epoch = NEW.epoch, bytes = bytes + length(NEW.data)
+    WHERE key = NEW.stream;
+END;
+
+CREATE TRIGGER batches_end_at_the_head
+BEFORE INSERT ON batches
+BEGIN
+    SELECT RAISE(ABORT, 'a batch must end at the head of its stream')
+    WHERE NEW.last <> (SELECT head FROM streams WHERE key = NEW.stream);
+    SELECT RAISE(ABORT, 'a batch cannot overlap the batch before it')
+    WHERE NEW.first <= (SELECT coalesce(max(last), 0) FROM batches WHERE stream = NEW.stream);
+END;
+
+CREATE TRIGGER streams_stay_in_their_space
+BEFORE UPDATE OF space, name ON streams
+BEGIN
+    SELECT RAISE(ABORT, 'a stream cannot move to another space or name');
+END;
+
+-- The batches of a stream by where they end: a page says which of its
+-- entries end one, and the trigger above finds the last.
+CREATE INDEX batches_by_end ON batches (stream, last);
+"#,
 ];
 
 /// What can go wrong opening the database.
@@ -265,6 +336,8 @@ pub enum AppendError {
     EntryTooLarge { size: u64, limit: u64 },
     #[error("the space holds {used} bytes and may hold {quota}: the batch's {size} more do not fit")]
     QuotaExceeded { used: u64, size: u64, quota: u64 },
+    #[error("the batch is to start at position {first}, and the stream's next place is {}", .head + 1)]
+    OutOfPlace { first: u64, head: u64 },
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
 }
@@ -456,7 +529,10 @@ impl Store {
 
     /// Appends a batch to the stream `name` of `space`. When the batch names
     /// a stream, only to that incarnation; when it does not, to whatever
-    /// stream has the name, creating one if none does.
+    /// stream has the name, creating one if none does. When it says which
+    /// position it starts at, only there - and a batch that starts at 1 and
+    /// names a stream the space does not have creates it with that identity:
+    /// a copy.
     ///
     /// A batch the stream has already is not written again: the answer is
     /// where it landed, with `repeated` - before the limits and the epoch are
@@ -487,22 +563,21 @@ impl Store {
                 return Err(AppendError::Replaced { name: name.clone(), expected, current: stream.id });
             }
             (Some(stream), _) => stream,
+            // A copy's first batch: the stream it copies, under its identity.
+            (None, Some(expected)) if batch.first == Some(1) => create(&tx, space, name, expected, epoch, now)?,
             (None, Some(expected)) => return Err(AppendError::NotFound { name: name.clone(), expected }),
-            (None, None) => {
-                let id = StreamId::from_bytes(random_bytes());
-                tx.execute(
-                    "INSERT INTO streams (space, name, id, epoch, head_hash, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-                    params![space, name.as_str(), id.as_bytes(), epoch.0, chain::genesis(&id).as_bytes(), now],
-                )?;
-                StreamRow { key: tx.last_insert_rowid(), id, epoch, head: 0, head_hash: chain::genesis(&id) }
-            }
+            (None, None) => create(&tx, space, name, StreamId::from_bytes(random_bytes()), epoch, now)?,
         };
         // Before everything else: a batch written before the stream moved on,
         // or before the operator lowered a limit, is still written, and its
         // writer is owed the answer it lost.
         if let Some((first, last)) = landed(&tx, &stream, &key)? {
             return Ok(Written { stream: stream.id, epoch: stream.epoch, first, last, repeated: true });
+        }
+        if let Some(first) = batch.first
+            && first != stream.head + 1
+        {
+            return Err(AppendError::OutOfPlace { first, head: stream.head });
         }
         if body > limits.body {
             return Err(AppendError::BodyTooLarge { size: body, limit: limits.body });
@@ -602,9 +677,16 @@ impl Store {
                     return Err(ReadError::Gap { name: name.clone(), expected, found: seq });
                 }
                 bytes += data.len();
-                entries.push(Entry { seq, epoch: Epoch(row.get(1)?), hash: hash_column(row.get(2)?)?, data });
+                entries.push(Entry {
+                    seq,
+                    epoch: Epoch(row.get(1)?),
+                    hash: hash_column(row.get(2)?)?,
+                    data,
+                    ends_batch: false,
+                });
             }
         }
+        ends_of_batches(&tx, &stream, &mut entries)?;
 
         Ok(Page { stream: stream.id, epoch: stream.epoch, head: stream.head, entries })
     }
@@ -858,6 +940,51 @@ fn stream_row(conn: &Connection, space: i64, name: &StreamName) -> rusqlite::Res
         .optional()
 }
 
+/// Makes `name` in `space` a stream with identity `id`, starting at
+/// `epoch`, with nothing in it yet.
+fn create(
+    conn: &Connection,
+    space: i64,
+    name: &StreamName,
+    id: StreamId,
+    epoch: Epoch,
+    now: i64,
+) -> rusqlite::Result<StreamRow> {
+    conn.execute(
+        "INSERT INTO streams (space, name, id, epoch, head_hash, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        params![space, name.as_str(), id.as_bytes(), epoch.0, chain::genesis(&id).as_bytes(), now],
+    )?;
+    Ok(StreamRow { key: conn.last_insert_rowid(), id, epoch, head: 0, head_hash: chain::genesis(&id) })
+}
+
+/// Marks the entries of a page that end the batch they were written in. An
+/// entry in no recorded batch - kept from before the relay recorded them -
+/// is a batch of its own.
+fn ends_of_batches(conn: &Connection, stream: &StreamRow, entries: &mut [Entry]) -> rusqlite::Result<()> {
+    let Some(low) = entries.first().map(|entry| entry.seq) else {
+        return Ok(());
+    };
+    // Batches do not overlap, so no more of them reach into the page than
+    // it has entries, and they come first in the order of their ends.
+    let mut select =
+        conn.prepare_cached("SELECT first, last FROM batches WHERE stream = ?1 AND last >= ?2 ORDER BY last LIMIT ?3")?;
+    let batches = select
+        .query_map(params![stream.key, to_sql(low), entries.len() as i64], |row| {
+            Ok((from_sql(row.get(0)?), from_sql(row.get(1)?)))
+        })?
+        .collect::<rusqlite::Result<Vec<(u64, u64)>>>()?;
+    let mut batches = batches.into_iter().peekable();
+    for entry in entries {
+        while batches.next_if(|&(_, last)| last < entry.seq).is_some() {}
+        entry.ends_batch = match batches.peek() {
+            Some(&(first, last)) if first <= entry.seq => last == entry.seq,
+            _ => true,
+        };
+    }
+    Ok(())
+}
+
 fn space_key(conn: &Connection, space: &SpaceName) -> rusqlite::Result<Option<i64>> {
     conn.prepare_cached("SELECT key FROM spaces WHERE name = ?1")?
         .query_row([space.as_str()], |row| row.get(0))
@@ -962,7 +1089,7 @@ mod tests {
     const ANY: WriteLimits = WriteLimits { body: u64::MAX, entry: u64::MAX, quota: u64::MAX };
 
     fn batch(epoch: u32, entries: Vec<Vec<u8>>, stream: Option<StreamId>) -> Batch {
-        Batch { epoch: Epoch(epoch), entries, stream }
+        Batch { epoch: Epoch(epoch), entries, stream, first: None }
     }
 
     /// The space a test writes in: made by handing it a key.
@@ -1242,6 +1369,122 @@ mod tests {
         assert_eq!((spaces[1].streams, spaces[1].bytes, spaces[1].written_at), (0, 0, None));
     }
 
+    fn placed(epoch: u32, entries: Vec<Vec<u8>>, stream: Option<StreamId>, first: u64) -> Batch {
+        Batch { first: Some(first), ..batch(epoch, entries, stream) }
+    }
+
+    fn ends(page: &Page) -> Vec<(u64, bool)> {
+        page.entries.iter().map(|entry| (entry.seq, entry.ends_batch)).collect()
+    }
+
+    #[test]
+    fn a_batch_that_says_where_it_goes_lands_there_or_nowhere() {
+        let (_dir, store) = store();
+        let s = in_space(&store, "a");
+        let one = batch(1, vec![b"a".to_vec(), b"b".to_vec()], None);
+        let id = append(&store, s, "s", &one).unwrap().stream;
+        for wrong in [1, 2, 4, 9] {
+            let error = append(&store, s, "s", &placed(1, vec![b"c".to_vec()], Some(id), wrong)).unwrap_err();
+            assert!(matches!(error, AppendError::OutOfPlace { first, head: 2 } if first == wrong), "{error}");
+        }
+        assert_eq!(store.state(s, &name("s")).unwrap().head, 2, "a batch out of place wrote something");
+        let written = append(&store, s, "s", &placed(1, vec![b"c".to_vec()], Some(id), 3)).unwrap();
+        assert_eq!((written.first, written.last, written.repeated), (3, 3, false));
+        // A batch the stream has is answered where it is, wherever it asked
+        // to go: the answer its writer lost comes before the place.
+        let again = append(&store, s, "s", &Batch { first: Some(8), ..one }).unwrap();
+        assert_eq!((again.first, again.last, again.repeated), (1, 2, true));
+        // A new stream's next place is 1.
+        let error = append(&store, s, "t", &placed(1, vec![b"x".to_vec()], None, 2)).unwrap_err();
+        assert!(matches!(error, AppendError::OutOfPlace { first: 2, head: 0 }), "{error}");
+        assert_eq!(store.state(s, &name("t")).unwrap(), StreamState::default(), "a refused batch made a stream");
+    }
+
+    #[test]
+    fn a_copy_takes_the_identity_of_the_stream_it_copies() {
+        let (_dir, store) = store();
+        let a = in_space(&store, "a");
+        let b = in_space(&store, "b");
+        let first = batch(1, vec![b"a".to_vec(), b"b".to_vec()], None);
+        let id = append(&store, a, "s", &first).unwrap().stream;
+        let second = batch(2, vec![b"c".to_vec()], Some(id));
+        append(&store, a, "s", &second).unwrap();
+        let original = store.read(a, &name("s"), None, ALL).unwrap();
+
+        // Into another space, and under another name in the same one: the
+        // same identity, the same links, the same batches.
+        for (space, stream) in [(b, "s"), (a, "copy")] {
+            let written = append(&store, space, stream, &Batch { stream: Some(id), first: Some(1), ..first.clone() });
+            assert_eq!(written.unwrap().stream, id);
+            append(&store, space, stream, &Batch { first: Some(3), ..second.clone() }).unwrap();
+            let copy = store.read(space, &name(stream), None, ALL).unwrap();
+            assert_eq!(copy, original, "the copy in {stream} is not the stream it copies");
+            let again = append(&store, space, stream, &Batch { stream: Some(id), ..first.clone() }).unwrap();
+            assert_eq!((again.first, again.repeated), (1, true), "the copy does not know its batches");
+        }
+
+        // Only a batch that starts the stream makes it.
+        for wrong in [None, Some(2)] {
+            let error = append(&store, b, "t", &Batch { stream: Some(id), first: wrong, ..first.clone() }).unwrap_err();
+            assert!(matches!(error, AppendError::NotFound { .. }), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_page_says_where_each_batch_ends() {
+        let (_dir, store) = store();
+        let s = in_space(&store, "a");
+        let entries = |n: u8| (0..n).map(|i| vec![n, i]).collect::<Vec<_>>();
+        let id = append(&store, s, "s", &batch(1, entries(2), None)).unwrap().stream;
+        append(&store, s, "s", &batch(1, entries(1), Some(id))).unwrap();
+        append(&store, s, "s", &batch(1, entries(3), Some(id))).unwrap();
+        let all = store.read(s, &name("s"), None, ALL).unwrap();
+        assert_eq!(ends(&all), [(1, false), (2, true), (3, true), (4, false), (5, false), (6, true)]);
+
+        // A page that stops inside a batch, and one that starts inside one.
+        let head = store.read(s, &name("s"), None, PageLimit { entries: 4, bytes: usize::MAX }).unwrap();
+        assert_eq!(ends(&head), [(1, false), (2, true), (3, true), (4, false)]);
+        let cursor = all.entries[0].cursor(id);
+        let tail = store.read(s, &name("s"), Some(&cursor), PageLimit { entries: 1, bytes: usize::MAX }).unwrap();
+        assert_eq!(ends(&tail), [(2, true)]);
+        let cursor = all.entries[3].cursor(id);
+        let tail = store.read(s, &name("s"), Some(&cursor), ALL).unwrap();
+        assert_eq!(ends(&tail), [(5, false), (6, true)]);
+    }
+
+    #[test]
+    fn an_entry_from_before_batches_were_recorded_is_a_batch_of_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = StreamId::from_bytes([6; 16]);
+        {
+            let mut conn = Connection::open(dir.path().join(DATABASE_FILE)).unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute_batch(MIGRATIONS[0]).unwrap();
+            tx.pragma_update(None, "user_version", 1).unwrap();
+            tx.execute(
+                "INSERT INTO streams (name, id, epoch, head_hash, created_at, updated_at) VALUES ('s', ?1, 1, ?2, 0, 0)",
+                params![id.as_bytes(), chain::genesis(&id).as_bytes()],
+            )
+            .unwrap();
+            let mut link = chain::genesis(&id);
+            for seq in 1..=2u64 {
+                link = chain::link(&link, seq, Epoch(1), b"old");
+                tx.execute(
+                    "INSERT INTO entries (stream, seq, epoch, hash, data) VALUES (1, ?1, 1, ?2, x'6f6c64')",
+                    params![seq as i64, link.as_bytes()],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let store = Store::open(dir.path()).unwrap();
+        let key = store.add_key(&space(DEFAULT_SPACE), Access::Write, "").unwrap();
+        let s = store.grant(&key.digest()).unwrap().unwrap().space;
+        append(&store, s, "s", &batch(1, vec![b"a".to_vec(), b"b".to_vec()], Some(id))).unwrap();
+        let page = store.read(s, &name("s"), None, ALL).unwrap();
+        assert_eq!(ends(&page), [(1, true), (2, true), (3, false), (4, true)]);
+    }
+
     /// A database as the release before this one left it: schema 2, with a
     /// stream and the batch that wrote it.
     fn release_before(dir: &Path, with_a_stream: bool) -> StreamId {
@@ -1289,6 +1532,11 @@ mod tests {
         assert_eq!((again.first, again.repeated), (1, true));
         let written = append(&store, s, "s", &batch(1, vec![b"new".to_vec()], Some(id))).unwrap();
         assert_eq!((written.first, written.last), (2, 2));
+        // The identity is not unique any more: a copy into another space
+        // takes it.
+        let other = in_space(&store, "other");
+        let copy = append(&store, other, "s", &placed(1, vec![b"old".to_vec()], Some(id), 1)).unwrap();
+        assert_eq!(copy.stream, id);
         let conn = lock(&store.writer);
         let error = conn
             .execute("INSERT INTO entries (stream, seq, epoch, hash, data) VALUES (1, 9, 1, zeroblob(32), x'00')", [])

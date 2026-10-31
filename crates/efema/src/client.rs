@@ -354,7 +354,7 @@ impl<T: Transport> Client<T> {
     /// has it. How many items it carried.
     async fn send_batch(&self, waiting: Waiting) -> Result<usize, Error> {
         let count = waiting.entries.len();
-        let batch = Batch { epoch: waiting.epoch, entries: waiting.entries, stream: Some(self.id) };
+        let batch = Batch { epoch: waiting.epoch, entries: waiting.entries, stream: Some(self.id), first: None };
         match self.transport.append(&self.stream, &batch).await {
             Ok(written) if written.stream != self.id => {
                 return Err(Error::StreamReplaced { stream: self.stream.clone() });
@@ -646,7 +646,7 @@ impl<T: Transport> Client<T> {
         })
         .await?;
         let entry = KeyEntry::new(&self.key, lock.clone(), generation)?;
-        let batch = Batch { epoch: self.epoch, entries: vec![entry.to_bytes()], stream: Some(self.id) };
+        let batch = Batch { epoch: self.epoch, entries: vec![entry.to_bytes()], stream: Some(self.id), first: None };
         let written = match self.transport.append(&self.stream, &batch).await {
             Ok(written) if written.stream != self.id => {
                 return Err(Error::StreamReplaced { stream: self.stream.clone() });
@@ -825,7 +825,7 @@ async fn establish<T: Transport>(
     })
     .await?;
     let entry = KeyEntry::new(&key, lock, 0)?;
-    let batch = Batch { epoch, entries: vec![entry.to_bytes()], stream: None };
+    let batch = Batch { epoch, entries: vec![entry.to_bytes()], stream: None, first: None };
     transport.append(stream, &batch).await.map_err(|e| write_error(e, stream, epoch))?;
 
     // Another device may have created a key for the same stream at the same
@@ -1091,7 +1091,10 @@ async fn blocking<R: Send + 'static>(work: impl FnOnce() -> R + Send + 'static) 
 ///
 /// A batch is `{0: epoch, 1: [entries...], 2: stream}`: a map head, three
 /// keys, the epoch, an array head and a byte string head per entry, and the
-/// sixteen bytes of the stream's identity.
+/// sixteen bytes of the stream's identity. And room for `3: first`, which a
+/// device does not send: the place a copy of the batch asks for, at its
+/// largest - so a batch a device cut to a relay's limits can be copied, in
+/// one piece, to a relay with the same ones.
 struct Sizer {
     max_body: usize,
     max_entry: usize,
@@ -1100,7 +1103,7 @@ struct Sizer {
 
 impl Sizer {
     fn new(epoch: Epoch, limits: &Limits) -> Self {
-        let fixed = 1 + 1 + head_len(u64::from(epoch.0)) + 1 + 1 + head_len(16) + 16;
+        let fixed = 1 + 1 + head_len(u64::from(epoch.0)) + 1 + 1 + head_len(16) + 16 + 1 + head_len(u64::MAX);
         let bytes = |limit: u64| usize::try_from(limit).unwrap_or(usize::MAX);
         Self { max_body: bytes(limits.body), max_entry: bytes(limits.entry), fixed }
     }
@@ -1182,6 +1185,7 @@ mod tests {
 
     #[test]
     fn the_sizer_measures_a_batch_as_the_encoder_writes_it() {
+        // As a copy sends it: named, and at the farthest place there is.
         let stream = Some(StreamId::from_bytes([1; 16]));
         for epoch in [Epoch(0), Epoch(24), Epoch(70_000)] {
             let sizer = Sizer::new(epoch, &body(u64::MAX));
@@ -1190,7 +1194,7 @@ mod tests {
             for len in [0, 1, 23, 24, 255, 256, 65_535, 65_536, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3] {
                 body = sizer.grow(body, entries.len(), len);
                 entries.push(vec![0; len]);
-                let encoded = wire::encode(&Batch { epoch, entries: entries.clone(), stream });
+                let encoded = wire::encode(&Batch { epoch, entries: entries.clone(), stream, first: Some(u64::MAX) });
                 assert_eq!(body, encoded.len(), "{} entries in epoch {epoch}", entries.len());
             }
         }
@@ -1225,6 +1229,7 @@ mod tests {
                 epoch: Epoch(1),
                 entries: batch.to_vec(),
                 stream: Some(StreamId::from_bytes([1; 16])),
+                first: Some(u64::MAX),
             });
             assert!(encoded.len() <= 300, "a batch of {} bytes", encoded.len());
             at += count;

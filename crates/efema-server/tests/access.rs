@@ -171,7 +171,7 @@ async fn a_batch_over_the_operators_limits_is_refused_with_the_limit() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_batch_written_before_the_limits_came_down_is_still_answered() {
     let relay = TestRelay::start().await;
-    let batch = Batch { epoch: Epoch(1), entries: vec![vec![1u8; 3000], vec![2u8; 3000]], stream: None };
+    let batch = Batch { epoch: Epoch(1), entries: vec![vec![1u8; 3000], vec![2u8; 3000]], stream: None, first: None };
     let written = relay.write_raw("notes", wire::encode(&batch)).await.unwrap();
     let dir = relay.stop().await;
 
@@ -226,7 +226,7 @@ async fn a_key_that_asks_too_often_is_told_when_to_ask_again() {
 /// A write to `notes` with the relay's key and `headers`, as a proxy in front
 /// of it would forward it.
 async fn forwarded(relay: &TestRelay, headers: &[(&str, &str)]) -> Result<Written, common::Refused> {
-    let batch = Batch { epoch: Epoch(1), entries: vec![b"through the door".to_vec()], stream: None };
+    let batch = Batch { epoch: Epoch(1), entries: vec![b"through the door".to_vec()], stream: None, first: None };
     let mut request = relay
         .client
         .post(relay.url("/v1/streams/notes/entries"))
