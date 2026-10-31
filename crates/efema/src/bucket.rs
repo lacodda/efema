@@ -69,6 +69,10 @@ const LIMITS: Limits = Limits { write: true, quota: u64::MAX, used: 0, rate: u64
 /// bucket's region: R2 takes `auto`, MinIO `us-east-1` unless set
 /// otherwise.
 ///
+/// One bucket holds the streams of several apps or people under prefixes of
+/// their own - [`Bucket::within`] - each with credentials that reach only
+/// its prefix.
+///
 /// ```
 /// use efema::{Bucket, Credentials};
 ///
@@ -87,6 +91,9 @@ struct Inner {
     origin: String,
     /// The bucket's path on the origin: empty for a bucket of its own host.
     path: String,
+    /// What every key efema writes starts with: empty, or a prefix with its
+    /// `/`.
+    prefix: String,
     /// The host as a request names it, port and all.
     host: String,
     region: String,
@@ -167,6 +174,7 @@ impl Bucket {
         Ok(Self(Arc::new(Inner {
             origin: format!("{}://{host}", parsed.scheme()),
             path: parsed.path().trim_end_matches('/').to_string(),
+            prefix: String::new(),
             host,
             region: region.to_string(),
             credentials,
@@ -176,8 +184,65 @@ impl Bucket {
         })))
     }
 
+    /// The same bucket, with efema's objects under `prefix` - `apps/notes`
+    /// keeps a stream `todo` at `apps/notes/todo/...` - rather than at its
+    /// root. Each part between slashes is letters, digits, `-`, `_` and
+    /// `.`, and not `.` or `..`; a `/` at the end is the same prefix.
+    ///
+    /// ```
+    /// use efema::{Bucket, Credentials};
+    ///
+    /// let credentials = Credentials::new("AKIDEXAMPLE", "not a real secret");
+    /// let bucket = Bucket::new("https://s3.example.com/shared", "us-east-1", credentials)?;
+    /// let notes = bucket.clone().within("apps/notes/")?;
+    /// assert_eq!(notes.to_string(), "https://s3.example.com/shared/apps/notes");
+    /// assert!(bucket.clone().within("apps//notes").is_err());
+    /// assert!(bucket.within("../notes").is_err());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`InvalidUrl`] when `prefix` is not a prefix as above.
+    pub fn within(self, prefix: &str) -> Result<Self, InvalidUrl> {
+        const WHAT: &str = "a prefix in a bucket";
+        let trimmed = prefix.strip_suffix('/').unwrap_or(prefix);
+        let part = |part: &str| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        };
+        if !trimmed.split('/').all(part) {
+            return Err(InvalidUrl::new(
+                prefix,
+                WHAT,
+                "parts between slashes are letters, digits, '-', '_' and '.', and none is empty, '.' or '..'",
+            ));
+        }
+        let inner = &self.0;
+        Ok(Self(Arc::new(Inner {
+            origin: inner.origin.clone(),
+            path: inner.path.clone(),
+            prefix: format!("{}{trimmed}/", inner.prefix),
+            host: inner.host.clone(),
+            region: inner.region.clone(),
+            credentials: inner.credentials.clone(),
+            http: inner.http.clone(),
+            // What was learnt of the bucket was learnt of its root: the
+            // prefix is probed, and read, on its own.
+            probed: OnceCell::new(),
+            known: Mutex::new(Known::default()),
+        })))
+    }
+
     fn base(&self) -> String {
-        format!("{}{}", self.0.origin, self.0.path)
+        let prefix = self.0.prefix.trim_end_matches('/');
+        if prefix.is_empty() {
+            format!("{}{}", self.0.origin, self.0.path)
+        } else {
+            format!("{}{}/{prefix}", self.0.origin, self.0.path)
+        }
     }
 
     /// Sends a signed request - to the object `key`, or to the bucket - and
@@ -192,7 +257,7 @@ impl Bucket {
         body: Option<Vec<u8>>,
     ) -> Result<Answer, TransportError> {
         let path = match key {
-            Some(key) => format!("{}/{}", self.0.path, sign::encode(key, true)),
+            Some(key) => format!("{}/{}", self.0.path, sign::encode(&format!("{}{key}", self.0.prefix), true)),
             None if self.0.path.is_empty() => "/".to_string(),
             None => self.0.path.clone(),
         };
@@ -340,15 +405,18 @@ impl Bucket {
     }
 
     /// The keys under `prefix` that come after `after`, in key order: at
-    /// most `max`, or all of them.
+    /// most `max`, or all of them. Keys here are below the bucket's own
+    /// prefix, which the listing adds and takes away.
     async fn list(&self, prefix: &str, after: Option<&str>, max: Option<usize>) -> Result<Vec<String>, TransportError> {
         let mut keys = Vec::new();
         let mut token: Option<String> = None;
+        let full = format!("{}{prefix}", self.0.prefix);
+        let after = after.map(|after| format!("{}{after}", self.0.prefix));
         loop {
             let want = max.map_or(1000, |max| (max - keys.len()).min(1000)).to_string();
-            let mut query = vec![("list-type", "2"), ("prefix", prefix), ("max-keys", want.as_str())];
-            if let Some(after) = after {
-                query.push(("start-after", after));
+            let mut query = vec![("list-type", "2"), ("prefix", full.as_str()), ("max-keys", want.as_str())];
+            if let Some(after) = &after {
+                query.push(("start-after", after.as_str()));
             }
             if let Some(token) = &token {
                 query.push(("continuation-token", token.as_str()));
@@ -361,10 +429,10 @@ impl Bucket {
                 .map_err(|_| self.not_protocol("a listing that is not text".to_string()))?;
             let found =
                 xml::all(text, "Key").ok_or_else(|| self.not_protocol("a listing that does not read".into()))?;
-            if let Some(stray) = found.iter().find(|key| !key.starts_with(prefix)) {
-                return Err(self.not_protocol(format!("a listing of {prefix} with {stray} in it")));
+            if let Some(stray) = found.iter().find(|key| !key.starts_with(&full)) {
+                return Err(self.not_protocol(format!("a listing of {full} with {stray} in it")));
             }
-            keys.extend(found);
+            keys.extend(found.into_iter().map(|key| key[self.0.prefix.len()..].to_string()));
             let more = xml::first(text, "IsTruncated").as_deref() == Some("true");
             if !more || max.is_some_and(|max| keys.len() >= max) {
                 return Ok(keys);
@@ -911,6 +979,12 @@ mod tests {
         let path = Bucket::new("http://127.0.0.1:9000/notes/", "us-east-1", credentials()).unwrap();
         assert_eq!((path.0.path.as_str(), path.0.host.as_str()), ("/notes", "127.0.0.1:9000"));
         assert_eq!(path.describe(), "http://127.0.0.1:9000/notes");
+        let within = path.clone().within("apps/one").unwrap().within("two/").unwrap();
+        assert_eq!((within.0.path.as_str(), within.0.prefix.as_str()), ("/notes", "apps/one/two/"));
+        assert_eq!(within.describe(), "http://127.0.0.1:9000/notes/apps/one/two");
+        for wrong in ["", "/", "/apps", "apps//one", "apps/./one", "..", "apps/one//", "apps one", "apps/café"] {
+            assert!(path.clone().within(wrong).is_err(), "{wrong:?} is taken as a prefix");
+        }
         let ipv6 = Bucket::new("http://[::1]:9000/notes", "us-east-1", credentials()).unwrap();
         assert_eq!(ipv6.0.host, "[::1]:9000");
         for (url, region) in [

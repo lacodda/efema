@@ -77,6 +77,8 @@ jobs:
       EFEMA_TEST_BUCKET_SECRET: not-a-secret-a-throwaway-minio
       EFEMA_TEST_BUCKET_READER_KEY: efema-reader
       EFEMA_TEST_BUCKET_READER_SECRET: not-a-secret-either
+      EFEMA_TEST_BUCKET_PREFIXED_KEY: efema-prefixed
+      EFEMA_TEST_BUCKET_PREFIXED_SECRET: not-a-secret-at-all
       EFEMA_TEST_BUCKET_REQUIRED: "1"
     steps:
       - uses: actions/checkout@v7
@@ -93,12 +95,19 @@ jobs:
           docker logs minio
           exit 1
       # A user that lists and reads the bucket and writes nothing - the
-      # credentials of a device that only reads.
-      - name: Make the bucket, and credentials that only read it
+      # credentials of a device that only reads - and one that reads and
+      # writes only under the prefix `prefixed/`.
+      - name: Make the bucket, credentials that only read it, and credentials held to a prefix
         run: |
           cat > "$RUNNER_TEMP/read.json" <<'POLICY'
           {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": ["s3:GetObject", "s3:ListBucket"],
            "Resource": ["arn:aws:s3:::efema-test", "arn:aws:s3:::efema-test/*"]}]}
+          POLICY
+          cat > "$RUNNER_TEMP/prefixed.json" <<'POLICY'
+          {"Version": "2012-10-17", "Statement": [
+           {"Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject"], "Resource": ["arn:aws:s3:::efema-test/prefixed/*"]},
+           {"Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": ["arn:aws:s3:::efema-test"],
+            "Condition": {"StringLike": {"s3:prefix": ["prefixed/*"]}}}]}
           POLICY
           mc() {
             docker run --rm --network host -v "$RUNNER_TEMP:/policy" \
@@ -109,6 +118,9 @@ jobs:
           mc admin user add ci "$EFEMA_TEST_BUCKET_READER_KEY" "$EFEMA_TEST_BUCKET_READER_SECRET"
           mc admin policy create ci efema-read /policy/read.json
           mc admin policy attach ci efema-read --user "$EFEMA_TEST_BUCKET_READER_KEY"
+          mc admin user add ci "$EFEMA_TEST_BUCKET_PREFIXED_KEY" "$EFEMA_TEST_BUCKET_PREFIXED_SECRET"
+          mc admin policy create ci efema-prefixed /policy/prefixed.json
+          mc admin policy attach ci efema-prefixed --user "$EFEMA_TEST_BUCKET_PREFIXED_KEY"
       - name: Test against the bucket
         run: cargo test -p efema --test bucket
       - name: 5080 files up and down through the bucket

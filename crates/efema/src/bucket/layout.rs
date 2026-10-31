@@ -1,5 +1,6 @@
 //! Where a stream lives in a bucket, object by object, and what each object
-//! holds.
+//! holds. The keys are the bucket's own, or under a prefix the bucket was
+//! given - `apps/notes/` before each.
 //!
 //! ```text
 //! .efema-probe                          efema's check that the bucket refuses to create an object twice

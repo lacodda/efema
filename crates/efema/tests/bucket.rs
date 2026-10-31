@@ -6,7 +6,9 @@
 //! (`us-east-1` if unset), `EFEMA_TEST_BUCKET_KEY` and
 //! `EFEMA_TEST_BUCKET_SECRET`, and credentials to the same bucket that only
 //! read it - `EFEMA_TEST_BUCKET_READER_KEY` and
-//! `EFEMA_TEST_BUCKET_READER_SECRET`. Without it these tests say they are skipped
+//! `EFEMA_TEST_BUCKET_READER_SECRET` - and credentials that read and write
+//! only under the prefix `prefixed/` of it - `EFEMA_TEST_BUCKET_PREFIXED_KEY`
+//! and `EFEMA_TEST_BUCKET_PREFIXED_SECRET`. Without it these tests say they are skipped
 //! and pass; with `EFEMA_TEST_BUCKET_REQUIRED` set they fail instead, so the
 //! CI job that runs them against MinIO cannot go green without a bucket.
 //! Every test writes streams of its own, under fresh names.
@@ -31,7 +33,11 @@ struct Settings {
     id: String,
     secret: String,
     reader: (String, String),
+    prefixed: (String, String),
 }
+
+/// The prefix the prefixed credentials reach, and nothing else.
+const PREFIXED: &str = "prefixed";
 
 impl Settings {
     fn from_env() -> Option<Self> {
@@ -50,6 +56,7 @@ impl Settings {
             id: var("EFEMA_TEST_BUCKET_KEY"),
             secret: var("EFEMA_TEST_BUCKET_SECRET"),
             reader: (var("EFEMA_TEST_BUCKET_READER_KEY"), var("EFEMA_TEST_BUCKET_READER_SECRET")),
+            prefixed: (var("EFEMA_TEST_BUCKET_PREFIXED_KEY"), var("EFEMA_TEST_BUCKET_PREFIXED_SECRET")),
         })
     }
 
@@ -65,6 +72,12 @@ impl Settings {
     /// The bucket, with credentials that only read it.
     fn for_reading(&self) -> Bucket {
         Bucket::new(self.url.as_str(), &self.region, Credentials::new(&self.reader.0, &self.reader.1)).unwrap()
+    }
+
+    /// The bucket, with credentials that reach only under [`PREFIXED`] -
+    /// at its root, as the credentials were handed out.
+    fn prefixed(&self) -> Bucket {
+        Bucket::new(self.url.as_str(), &self.region, Credentials::new(&self.prefixed.0, &self.prefixed.1)).unwrap()
     }
 
     /// The bucket, reached through `proxy` on this machine.
@@ -590,6 +603,57 @@ async fn a_batch_that_says_where_it_goes_lands_there_or_nowhere() {
     let other = StreamId::from_bytes([0x43; 16]);
     let (code, _) = refusal(bucket.append(&copy, &Batch { first: Some(1), ..batch(&[b"y"], Some(other)) }).await);
     assert_eq!(code, ProblemCode::StreamReplaced);
+}
+
+/// Streams under a prefix are their own: the same name at the root and under
+/// two prefixes is three streams.
+#[tokio::test(flavor = "multi_thread")]
+async fn streams_under_a_prefix_are_apart_from_the_root_and_from_each_other() {
+    let Some(at) = Settings::from_env() else { return };
+    let stream = at.fresh("apart");
+    let buckets = [at.bucket(), at.bucket().within("apps/one").unwrap(), at.bucket().within("apps/two").unwrap()];
+    let mut ids = Vec::new();
+    for (bucket, text) in buckets.iter().zip([b"root".as_slice(), b"one", b"two"]) {
+        let written = bucket.append(&stream, &batch(&[text], None)).await.unwrap();
+        assert_eq!((written.first, written.repeated), (1, false), "{bucket} saw another's stream");
+        ids.push(written.stream);
+    }
+    assert!(ids[0] != ids[1] && ids[1] != ids[2] && ids[0] != ids[2], "{ids:?}");
+    for (bucket, text) in buckets.iter().zip(["root", "one", "two"]) {
+        let page = bucket.read(&stream, None, 10).await.unwrap();
+        assert_eq!(texts(&page.entries), [text], "{bucket}");
+    }
+    // One prefix, however it is spelled.
+    for same in [at.bucket().within("apps/one/").unwrap(), at.bucket().within("apps").unwrap().within("one").unwrap()] {
+        assert_eq!(same.read(&stream, None, 10).await.unwrap().stream, ids[1], "{same}");
+    }
+}
+
+/// Credentials that reach only under a prefix - the way one bucket is shared
+/// between apps or people - sync there, and reach nothing outside it.
+#[tokio::test(flavor = "multi_thread")]
+async fn credentials_that_reach_only_a_prefix_sync_within_it() {
+    let Some(at) = Settings::from_env() else { return };
+    let stream = at.fresh("tenant");
+    let mine = at.prefixed().within(PREFIXED).unwrap();
+    assert!(mine.limits().await.unwrap().write, "the probe under the prefix was refused");
+    let (laptop, phone) = (Device::new(), Device::new());
+    let on_laptop = laptop.open(mine.clone(), stream.as_str(), 1).await;
+    on_laptop.push([b"mine".as_slice()]).await.unwrap();
+    let on_phone = phone.open(mine, stream.as_str(), 1).await;
+    assert_eq!(data(&drain(&on_phone).await), [b"mine".as_slice()]);
+
+    // The bucket's owner finds it under the prefix, and not at the root.
+    let owner = at.bucket().within(PREFIXED).unwrap();
+    assert_eq!(owner.read(&stream, None, 10).await.unwrap().stream, on_laptop.stream_id());
+    let (code, _) = refusal(at.bucket().read(&stream, None, 10).await);
+    assert_eq!(code, ProblemCode::StreamNotFound);
+
+    // Outside it, the credentials neither write nor read.
+    let outside = at.prefixed();
+    assert!(!outside.limits().await.unwrap().write);
+    let (code, _) = refusal(outside.read(&at.fresh("outside"), None, 10).await);
+    assert_eq!(code, ProblemCode::Forbidden);
 }
 
 /// A service that takes `If-None-Match` and ignores it - every PUT a

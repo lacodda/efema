@@ -32,6 +32,13 @@ batch's key **from nines**: each digit `d` as `9 - d`. Position 1 is
 So a listing of `<stream>/<id>/b/`, which S3 returns in the order of the
 keys, starts with the newest batch.
 
+The keys may be under a **prefix** - `apps/notes/` before each of them, the
+probe included - so one bucket holds the streams of several apps or people,
+each with credentials that reach only its own. The prefix is where a client is
+told to look; nothing in the objects names it, and the layout under it is the
+same. A prefix is parts of letters, digits, `-`, `_` and `.` between slashes,
+none of them `.` or `..`.
+
 Every object above except the offers is created with `If-None-Match: *` - and
 only if there is none under its key. The offers are written plainly. Nothing
 is ever deleted.

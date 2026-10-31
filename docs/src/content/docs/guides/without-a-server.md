@@ -25,8 +25,9 @@ whole layout.
   creation through, rather than fork a stream there without a word.
 - **To show a write to every read after it**, listings included. Amazon S3
   and MinIO do.
-- **A bucket for the app's streams**, or one shared by several apps whose
-  stream names differ. A stream lives under its name, at the bucket's root.
+- **A bucket for the app's streams** - or a prefix in one that several apps
+  or people share. A stream lives under its name, at the bucket's root or
+  under the prefix it is given.
 
 The credentials are an access key's id and secret, as the service issues them.
 The secret never leaves the device: each request carries a signature made
@@ -153,6 +154,45 @@ epoch    1 - written, and read up to
 
 Credentials that write need `s3:PutObject` as well; efema never deletes.
 
+## Under a prefix
+
+One bucket can hold the streams of several apps or people, each under a
+prefix of its own, with credentials that reach only theirs. `Bucket::within`
+gives the prefix; everything efema keeps is under it, the probe included:
+
+```rust
+let bucket = Bucket::new("https://s3.eu-central-1.amazonaws.com/shared", "eu-central-1", credentials)?
+    .within("apps/notes")?;
+```
+
+A policy that holds credentials to the prefix `apps/notes/` - reading,
+writing, and listing only there:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject"],
+      "Resource": ["arn:aws:s3:::shared/apps/notes/*"]
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": ["arn:aws:s3:::shared"],
+      "Condition": { "StringLike": { "s3:prefix": ["apps/notes/*"] } }
+    }
+  ]
+}
+```
+
+Outside the prefix such credentials write nothing and read nothing: a device
+given the bucket without its prefix is refused there, as `forbidden`.
+`mini-vault` takes the prefix as `--prefix`;
+the [move into a bucket](/efema/guides/moving-a-stream/#with-the-example-app)
+puts a stream under one.
+
 ## What it costs
 
 S3 bills by the request and by what is kept. What efema asks of a bucket:
@@ -192,4 +232,6 @@ bucket's owner can and cannot do.
 
 - [A stream in a bucket](/efema/reference/bucket/) - the objects, their keys
   and what each holds.
+- [Moving a stream](/efema/guides/moving-a-stream/) - from a relay into a
+  bucket, or back, with the devices going on from where they stood.
 - [Syncing an app](/efema/guides/syncing-an-app/) - the client library.
