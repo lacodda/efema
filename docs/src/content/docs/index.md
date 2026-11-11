@@ -74,14 +74,14 @@ what changes against a relay.
 
 ## Status
 
-0.9.0 is the relay and the Rust client library,
+0.10.0 is the relay and the Rust client library,
 [`efema`](https://docs.rs/efema), which syncs through a relay or through an S3
 bucket with nothing to run ([Without a server](/efema/guides/without-a-server/)),
 and moves a stream between them - or between relays - with every device going
 on from where it stood ([Moving a stream](/efema/guides/moving-a-stream/));
 and a relay safe to leave reachable behind an HTTPS proxy: access keys to spaces, that read or that write; limits per key,
-announced and followed; plain HTTP from outside refused. It installs with one
-command and runs as a service on a Linux server
+announced and followed; plain HTTP from outside refused. It installs with
+Homebrew, Scoop or one command and runs as a service on a Linux server
 ([On a server](/efema/guides/on-a-server/)). Every entry is compressed and
 sealed on the device with a key the relay never has, kept there until the
 relay has it and written once however often a broken network sends it again;

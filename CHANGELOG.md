@@ -22,6 +22,42 @@ A release is added with:
 $ git cliff --unreleased --tag vX.Y.Z --prepend CHANGELOG.md
 ```
 
+## [0.10.0] - 2026-11-11
+
+### Breaking Changes
+
+- **Name the installers' variables after the program**: the installers refuse EFEMA_VERSION and
+EFEMA_INSTALL_DIR and name the variable to set instead - a script
+written for them stops rather than installing where it was not told.
+
+### Features
+
+- Name the installers' variables after the program
+
+### Bug Fixes
+
+- Upgrade a relay on Windows while it runs
+- Name the version asked for when it is no tag
+
+### Documentation
+
+- Show the server upgrade to 0.9.0 as it printed
+- Install the relay with Homebrew and Scoop
+
+### Build
+
+- Describe a release of efema in release.toml
+
+### CI
+
+- End the release notes with what was checked live
+- Publish to crates.io only once the release is out
+- Install into a scratch directory and over a running relay
+
+### Standard
+
+- Take the line's standard 2026.11.5
+
 ## [0.9.0] - 2026-10-31
 
 ### Breaking Changes

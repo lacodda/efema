@@ -12,12 +12,12 @@ up, and the same two upgrade it.
 
 ```console
 $ curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/install.sh | sudo EFEMA_SERVER_INSTALL_DIR=/usr/local/bin sh
-Downloading https://github.com/lacodda/efema/releases/download/v0.9.0/efema-server-v0.9.0-aarch64-unknown-linux-gnu.tar.gz
-Installed efema-server 0.9.0 to /usr/local/bin/efema-server
+Downloading https://github.com/lacodda/efema/releases/download/v0.10.0/efema-server-v0.10.0-aarch64-unknown-linux-gnu.tar.gz
+Installed efema-server 0.10.0 to /usr/local/bin/efema-server
 Next: https://lacodda.github.io/efema/getting-started/ - or, as a service on a Linux server, https://lacodda.github.io/efema/guides/on-a-server/
 $ curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/service.sh | sudo sh
 Made the system user efema
-efema-server 0.9.0 answers on port 2451, data in /var/lib/efema
+efema-server 0.10.0 answers on port 2451, data in /var/lib/efema
 ```
 
 The first puts the binary from the latest release - for x86_64 or 64-bit ARM,
@@ -126,12 +126,12 @@ database to a newer schema, and that only goes forward:
 
 ```console
 $ curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/install.sh | sudo EFEMA_SERVER_INSTALL_DIR=/usr/local/bin sh
-Downloading https://github.com/lacodda/efema/releases/download/v0.9.0/efema-server-v0.9.0-aarch64-unknown-linux-gnu.tar.gz
-Installed efema-server 0.9.0 to /usr/local/bin/efema-server
+Downloading https://github.com/lacodda/efema/releases/download/v0.10.0/efema-server-v0.10.0-aarch64-unknown-linux-gnu.tar.gz
+Installed efema-server 0.10.0 to /usr/local/bin/efema-server
 Next: https://lacodda.github.io/efema/getting-started/ - or, as a service on a Linux server, https://lacodda.github.io/efema/guides/on-a-server/
 $ curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/service.sh | sudo sh
 Copied /var/lib/efema to /var/lib/efema.backups/20261031T201007Z
-efema-server 0.9.0 answers on port 2451, data in /var/lib/efema
+efema-server 0.10.0 answers on port 2451, data in /var/lib/efema
 ```
 
 The newest five copies are kept in `/var/lib/efema.backups`. Putting one back
