@@ -11,7 +11,7 @@ up, and the same two upgrade it.
 ## Install
 
 ```console
-$ curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/install.sh | sudo EFEMA_INSTALL_DIR=/usr/local/bin sh
+$ curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/install.sh | sudo EFEMA_SERVER_INSTALL_DIR=/usr/local/bin sh
 Downloading https://github.com/lacodda/efema/releases/download/v0.9.0/efema-server-v0.9.0-aarch64-unknown-linux-gnu.tar.gz
 Installed efema-server 0.9.0 to /usr/local/bin/efema-server
 Next: https://lacodda.github.io/efema/getting-started/ - or, as a service on a Linux server, https://lacodda.github.io/efema/guides/on-a-server/
@@ -21,7 +21,7 @@ efema-server 0.9.0 answers on port 2451, data in /var/lib/efema
 ```
 
 The first puts the binary from the latest release - for x86_64 or 64-bit ARM,
-a Raspberry Pi among them - in `/usr/local/bin`; `EFEMA_VERSION=v0.9.0` pins a
+a Raspberry Pi among them - in `/usr/local/bin`; `EFEMA_SERVER_VERSION=vX.Y.Z` pins a
 release instead. The second, which needs systemd:
 
 - makes the system user `efema` and its data directory, the first time;
@@ -125,7 +125,7 @@ stops it and copies its data directory aside - a newer release may move the
 database to a newer schema, and that only goes forward:
 
 ```console
-$ curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/install.sh | sudo EFEMA_INSTALL_DIR=/usr/local/bin sh
+$ curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/install.sh | sudo EFEMA_SERVER_INSTALL_DIR=/usr/local/bin sh
 Downloading https://github.com/lacodda/efema/releases/download/v0.9.0/efema-server-v0.9.0-aarch64-unknown-linux-gnu.tar.gz
 Installed efema-server 0.9.0 to /usr/local/bin/efema-server
 Next: https://lacodda.github.io/efema/getting-started/ - or, as a service on a Linux server, https://lacodda.github.io/efema/guides/on-a-server/
@@ -136,6 +136,11 @@ efema-server 0.9.0 answers on port 2451, data in /var/lib/efema
 
 The newest five copies are kept in `/var/lib/efema.backups`. Putting one back
 is the same as any [backup](/efema/guides/backups/#restoring).
+
+The installer's variables are named after the program. Before 0.10.0 they
+were `EFEMA_VERSION` and `EFEMA_INSTALL_DIR`; an installer from 0.10.0 on
+refuses those and names the ones to set instead, so a script written for the
+old names stops rather than installing somewhere it was not told to.
 
 ## Related
 

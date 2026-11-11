@@ -2,7 +2,7 @@
 # Runs efema-server as a systemd service on this Linux machine - or moves a
 # running one onto the binary installed since. As root, after install.sh:
 #
-#   curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/install.sh | sudo EFEMA_INSTALL_DIR=/usr/local/bin sh
+#   curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/install.sh | sudo EFEMA_SERVER_INSTALL_DIR=/usr/local/bin sh
 #   curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/service.sh | sudo sh
 #
 # Makes the `efema` system user and /var/lib/efema the first time, writes the
@@ -34,7 +34,7 @@ if ! command -v systemctl >/dev/null 2>&1; then
 fi
 if [ ! -x "$BIN" ]; then
     echo "No efema-server at $BIN - install it there first:" >&2
-    echo "  curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/install.sh | sudo EFEMA_INSTALL_DIR=/usr/local/bin sh" >&2
+    echo "  curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/install.sh | sudo EFEMA_SERVER_INSTALL_DIR=/usr/local/bin sh" >&2
     exit 1
 fi
 

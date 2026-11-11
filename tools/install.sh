@@ -2,12 +2,25 @@
 # efema-server installer for Linux and macOS:
 #   curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/install.sh | sh
 #
-# EFEMA_VERSION pins a release (v0.6.0); EFEMA_INSTALL_DIR is where the binary
-# goes (~/.local/bin). On a server, put it where the service looks for it:
-#   curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/install.sh | sudo EFEMA_INSTALL_DIR=/usr/local/bin sh
+# EFEMA_SERVER_VERSION pins a release (vX.Y.Z); EFEMA_SERVER_INSTALL_DIR is
+# where the binary goes (~/.local/bin); EFEMA_SERVER_NO_PATH=1 says nothing
+# about the PATH. On a server, put it where the service looks for it:
+#   curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/install.sh | sudo EFEMA_SERVER_INSTALL_DIR=/usr/local/bin sh
 set -eu
 
 REPO="lacodda/efema"
+
+# The variables are named after the program, as the line's release engine
+# names them. The names they had before 0.10.0 are refused rather than
+# ignored: an install told where to go and sent somewhere else would leave a
+# service on its old binary without a word.
+for old in EFEMA_VERSION EFEMA_INSTALL_DIR; do
+    eval "given=\${$old:-}"
+    if [ -n "$given" ]; then
+        echo "$old is now EFEMA_SERVER_${old#EFEMA_} - set that instead" >&2
+        exit 1
+    fi
+done
 
 case "$(uname -s)-$(uname -m)" in
     Linux-x86_64) TARGET="x86_64-unknown-linux-gnu" ;;
@@ -34,7 +47,7 @@ esac
 # unauthenticated API calls are capped at 60 an hour per address, and an
 # installer that fails because someone else behind the same address ran it is
 # no installer.
-TAG="${EFEMA_VERSION:-}"
+TAG="${EFEMA_SERVER_VERSION:-}"
 if [ -z "$TAG" ]; then
     LOCATION=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest" || true)
     TAG="${LOCATION##*/}"
@@ -42,7 +55,7 @@ fi
 case "$TAG" in
     v[0-9]*) ;;
     *)
-        echo "Cannot tell the latest release of $REPO - set EFEMA_VERSION to a tag like v0.6.0" >&2
+        echo "Cannot tell the latest release of $REPO - set EFEMA_SERVER_VERSION to a tag (vX.Y.Z)" >&2
         exit 1
         ;;
 esac
@@ -61,13 +74,17 @@ if [ -z "$BIN" ]; then
     exit 1
 fi
 
-DIR="${EFEMA_INSTALL_DIR:-$HOME/.local/bin}"
+DIR="${EFEMA_SERVER_INSTALL_DIR:-$HOME/.local/bin}"
 mkdir -p "$DIR"
 install -m 755 "$BIN" "$DIR/efema-server"
 echo "Installed $("$DIR/efema-server" --version) to $DIR/efema-server"
 
-case ":$PATH:" in
-    *":$DIR:"*) ;;
-    *) echo "Note: add $DIR to your PATH." ;;
-esac
-echo "Next: https://lacodda.github.io/efema/getting-started/ - or, as a service on a Linux server, https://lacodda.github.io/efema/guides/on-a-server/"
+# EFEMA_SERVER_NO_PATH: an install into a scratch directory - the release
+# check that proves the installer works - has no PATH to talk about.
+if [ -z "${EFEMA_SERVER_NO_PATH:-}" ]; then
+    case ":$PATH:" in
+        *":$DIR:"*) ;;
+        *) echo "Note: add $DIR to your PATH." ;;
+    esac
+    echo "Next: https://lacodda.github.io/efema/getting-started/ - or, as a service on a Linux server, https://lacodda.github.io/efema/guides/on-a-server/"
+fi

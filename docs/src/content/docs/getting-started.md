@@ -5,22 +5,36 @@ description: Install the efema relay, hand out a key, run it, and look at what i
 
 ## Install
 
-On Linux - x86_64 or 64-bit ARM, a Raspberry Pi among them - and on macOS on
-Apple silicon:
+On macOS on Apple silicon and on Linux - x86_64 or 64-bit ARM, a Raspberry Pi
+among them - with Homebrew:
+
+```console
+$ brew install lacodda/tap/efema-server
+```
+
+On Windows, with Scoop:
+
+```console
+> scoop bucket add lacodda https://github.com/lacodda/scoop-bucket
+> scoop install efema-server
+```
+
+Without a package manager, the installers put `efema-server` from the latest
+release in your user's programs (`~/.local/bin`,
+`%LOCALAPPDATA%\Programs\efema`):
 
 ```console
 $ curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/install.sh | sh
 ```
 
-On Windows, in PowerShell:
-
 ```console
 > irm https://raw.githubusercontent.com/lacodda/efema/main/tools/install.ps1 | iex
 ```
 
-Either puts `efema-server` from the latest release in your user's programs
-(`~/.local/bin`, `%LOCALAPPDATA%\Programs\efema`); `EFEMA_VERSION=v0.9.0` pins a
-release and `EFEMA_INSTALL_DIR` picks the directory. With a Rust toolchain,
+`EFEMA_SERVER_VERSION=vX.Y.Z` pins a release, `EFEMA_SERVER_INSTALL_DIR` picks
+the directory and `EFEMA_SERVER_NO_PATH=1` leaves the PATH alone. On Windows
+an update can run while the relay does: the running program is moved aside,
+and the next install deletes it. With a Rust toolchain,
 `cargo install efema-server` builds it instead, and the archives are on the
 [latest release](https://github.com/lacodda/efema/releases/latest).
 

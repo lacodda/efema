@@ -25,7 +25,7 @@ permissions:
 env:
   # A tag push names its tag as the branch of the run it started; empty means
   # the latest release.
-  EFEMA_VERSION: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || inputs.tag }}
+  EFEMA_SERVER_VERSION: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || inputs.tag }}
 
 jobs:
   unix:
@@ -46,17 +46,28 @@ jobs:
         run: |
           version=$("$HOME/.local/bin/efema-server" --version)
           echo "$version"
-          if [ -n "$EFEMA_VERSION" ]; then test "$version" = "efema-server ${EFEMA_VERSION#v}"; fi
+          if [ -n "$EFEMA_SERVER_VERSION" ]; then test "$version" = "efema-server ${EFEMA_SERVER_VERSION#v}"; fi
       - name: As a service, set up and upgraded
         if: runner.os == 'Linux'
         run: |
-          cat tools/install.sh | sudo EFEMA_VERSION="$EFEMA_VERSION" EFEMA_INSTALL_DIR=/usr/local/bin sh
+          cat tools/install.sh | sudo EFEMA_SERVER_VERSION="$EFEMA_SERVER_VERSION" EFEMA_SERVER_INSTALL_DIR=/usr/local/bin sh
           sudo sh tools/service.sh
           sudo -u efema efema-server keys add ci write --label install --data /var/lib/efema >/dev/null
           sudo sh tools/service.sh
           test -n "$(sudo ls /var/lib/efema.backups)"
           curl -fsS http://127.0.0.1:2451/health
           sudo -u efema efema-server keys --data /var/lib/efema
+      # The stand's own command, as a deploy runs it there: what
+      # tools/stand/stage.sh assembles, put over the service set up above.
+      # Only for a release just made - the version the stage names is the
+      # manifest's, which is out only once its release is.
+      - name: As a stand, upgraded
+        if: runner.os == 'Linux' && github.event_name == 'workflow_run'
+        run: |
+          sh tools/stand/stage.sh "$RUNNER_TEMP/stand"
+          sudo sh "$RUNNER_TEMP/stand/stand.sh"
+          curl -fsS http://127.0.0.1:2451/health
+          test "$(efema-server --version)" = "efema-server $(cut -c2- "$RUNNER_TEMP/stand/VERSION")"
 
   windows:
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
@@ -73,4 +84,4 @@ jobs:
         run: |
           $version = & (Join-Path $env:LOCALAPPDATA "Programs\efema\efema-server.exe") --version
           $version
-          if ($env:EFEMA_VERSION -and $version -ne "efema-server $($env:EFEMA_VERSION.TrimStart('v'))") { throw "installed $version" }
+          if ($env:EFEMA_SERVER_VERSION -and $version -ne "efema-server $($env:EFEMA_SERVER_VERSION.TrimStart('v'))") { throw "installed $version" }
