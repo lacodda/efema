@@ -47,6 +47,14 @@ jobs:
           version=$("$HOME/.local/bin/efema-server" --version)
           echo "$version"
           if [ -n "$EFEMA_SERVER_VERSION" ]; then test "$version" = "efema-server ${EFEMA_SERVER_VERSION#v}"; fi
+      # As the release engine proves a release: into a scratch directory, the
+      # PATH left out of it.
+      - name: Into a scratch directory
+        run: |
+          said=$(cat tools/install.sh | EFEMA_SERVER_INSTALL_DIR="$RUNNER_TEMP/scratch" EFEMA_SERVER_NO_PATH=1 sh)
+          echo "$said"
+          "$RUNNER_TEMP/scratch/efema-server" --version
+          if echo "$said" | grep -q PATH; then echo "the install talked about the PATH" >&2; exit 1; fi
       - name: As a service, set up and upgraded
         if: runner.os == 'Linux'
         run: |
@@ -85,3 +93,29 @@ jobs:
           $version = & (Join-Path $env:LOCALAPPDATA "Programs\efema\efema-server.exe") --version
           $version
           if ($env:EFEMA_SERVER_VERSION -and $version -ne "efema-server $($env:EFEMA_SERVER_VERSION.TrimStart('v'))") { throw "installed $version" }
+      # As the release engine proves a release: into a scratch directory, the
+      # user PATH exactly as it was.
+      - name: Into a scratch directory
+        shell: powershell
+        run: |
+          $before = (Get-Item HKCU:\Environment).GetValue("Path", "", "DoNotExpandEnvironmentNames")
+          $env:EFEMA_SERVER_INSTALL_DIR = Join-Path $env:RUNNER_TEMP "scratch"
+          $env:EFEMA_SERVER_NO_PATH = "1"
+          Get-Content -Raw tools/install.ps1 | Invoke-Expression
+          & (Join-Path $env:EFEMA_SERVER_INSTALL_DIR "efema-server.exe") --version
+          $after = (Get-Item HKCU:\Environment).GetValue("Path", "", "DoNotExpandEnvironmentNames")
+          if ($after -ne $before) { throw "the user PATH changed: $after" }
+      # A relay serving on this machine holds its exe open; the upgrade moves
+      # it aside instead of failing, and the relay serves on.
+      - name: Upgraded while the relay runs
+        shell: powershell
+        run: |
+          $dir = Join-Path $env:LOCALAPPDATA "Programs\efema"
+          $relay = Start-Process (Join-Path $dir "efema-server.exe") -ArgumentList "serve", "--data", (Join-Path $env:RUNNER_TEMP "relay") -PassThru
+          Start-Sleep -Seconds 3
+          if ($relay.HasExited) { throw "the relay did not start" }
+          Get-Content -Raw tools/install.ps1 | Invoke-Expression
+          if ($relay.HasExited) { throw "the upgrade stopped the relay" }
+          if (-not (Get-ChildItem $dir -Filter "efema-server.exe.old-*")) { throw "nothing was moved aside" }
+          Invoke-WebRequest -UseBasicParsing http://127.0.0.1:2451/health | Select-Object -ExpandProperty Content
+          Stop-Process -Id $relay.Id
