@@ -130,7 +130,7 @@ Downloading https://github.com/lacodda/efema/releases/download/v0.10.0/efema-ser
 Installed efema-server 0.10.0 to /usr/local/bin/efema-server
 Next: https://lacodda.github.io/efema/getting-started/ - or, as a service on a Linux server, https://lacodda.github.io/efema/guides/on-a-server/
 $ curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/service.sh | sudo sh
-Copied /var/lib/efema to /var/lib/efema.backups/20261031T201007Z
+Copied /var/lib/efema to /var/lib/efema.backups/20261111T130724Z
 efema-server 0.10.0 answers on port 2451, data in /var/lib/efema
 ```
 
