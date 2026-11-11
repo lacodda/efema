@@ -494,3 +494,56 @@ fn every_installer_asks_for_an_archive_the_release_makes() {
     assert!(built.contains(&target), "install.ps1 asks for {target}, which release.yml does not build");
     assert!(windows.contains("$name.zip") && release.contains("\"$name.zip\""));
 }
+
+/// `release.toml` tells the line's release engine what a release of efema is:
+/// the crates it publishes, the files its page carries and the program its
+/// installers put in place. Each is said once more there, and drifts like any
+/// copy - a crate left out is never waited for, a target left out is never
+/// checked on the page.
+#[test]
+fn release_toml_names_what_a_release_makes() {
+    let config = read("release.toml");
+
+    // The crates on efema's version, in the order publish.yml publishes them;
+    // the line's crates keep versions of their own and are not this release's.
+    let packages: Vec<&str> = config
+        .split("[[package]]")
+        .skip(1)
+        .filter_map(|block| block.lines().find_map(|l| l.trim().strip_prefix("name = \"")?.strip_suffix('"')))
+        .collect();
+    let publish = read(".github/workflows/publish.yml");
+    let order = publish.lines().find(|l| l.trim().starts_with("for crate in ")).expect("publish.yml loops over crates");
+    let ours = efema_crates();
+    let expected: Vec<&str> = order
+        .trim()
+        .trim_start_matches("for crate in ")
+        .trim_end_matches("; do")
+        .split_whitespace()
+        .filter(|c| ours.iter().any(|o| o == c))
+        .collect();
+    assert_eq!(packages, expected, "release.toml must list efema's crates, in the order publish.yml publishes them");
+
+    // One file on the page for every target release.yml builds.
+    let release = read(".github/workflows/release.yml");
+    let mut built: Vec<String> = release
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("target: "))
+        .map(|target| {
+            let kind = if target.contains("windows") { "zip" } else { "tar.gz" };
+            format!("efema-server-{{tag}}-{}.{kind}", target.trim())
+        })
+        .collect();
+    let mut assets: Vec<String> = between(&config, "assets = [", "]")
+        .lines()
+        .map(|l| l.trim().trim_end_matches(',').trim_matches('"').to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    built.sort();
+    assets.sort();
+    assert_eq!(assets, built, "[page] assets in release.toml are not the archives release.yml makes");
+
+    assert!(
+        config.contains("[post.install]\nbin = \"efema-server\"\n"),
+        "release.toml must install the program the installers put in place, efema-server"
+    );
+}

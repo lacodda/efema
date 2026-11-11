@@ -65,6 +65,17 @@ Two rules the code keeps, and every change has to keep too:
 from them (`cliff.toml`), so a commit message is the line the release notes
 will carry.
 
+## Releasing
+
+`release.toml` says what a release of efema is, for the line's release engine
+([furca](https://lacodda.github.io/furca/reference/release/)): the crates on
+efema's version, the archives its page carries, the installers that put
+`efema-server` in place, and the stand it goes to. `furca release verify
+vX.Y.Z --install` checks a release that went out - the page, crates.io, the
+links, and an install into a scratch directory proven to be the release's own
+build. The notes of every release end with the list in
+`.github/release-notes.md`, ticked once it has been checked live.
+
 ## Decisions
 
 An architectural decision gets a record in [`docs/adr/`](docs/adr/README.md):
