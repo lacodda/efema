@@ -55,7 +55,11 @@ fi
 case "$TAG" in
     v[0-9]*) ;;
     *)
-        echo "Cannot tell the latest release of $REPO - set EFEMA_SERVER_VERSION to a tag (vX.Y.Z)" >&2
+        if [ -n "${EFEMA_SERVER_VERSION:-}" ]; then
+            echo "EFEMA_SERVER_VERSION is '$TAG', which is not a release tag (vX.Y.Z)" >&2
+        else
+            echo "Cannot tell the latest release of $REPO - set EFEMA_SERVER_VERSION to a tag (vX.Y.Z)" >&2
+        fi
         exit 1
         ;;
 esac

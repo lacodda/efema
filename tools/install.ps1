@@ -35,6 +35,9 @@ if (-not $tag) {
         throw "Cannot tell the latest release of ${repo}: $($_.Exception.Message)"
     }
 }
+if ($env:EFEMA_SERVER_VERSION -and $tag -notmatch '^v\d') {
+    throw "EFEMA_SERVER_VERSION is '$tag', which is not a release tag (vX.Y.Z)"
+}
 if (-not $tag -or $tag -notmatch '^v\d') {
     throw "Cannot tell the latest release of $repo - set `$env:EFEMA_SERVER_VERSION to a tag (vX.Y.Z)"
 }

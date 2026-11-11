@@ -59,9 +59,8 @@ fn the_installers_read_the_names_the_release_engine_sets() {
 fn the_installers_refuse_the_names_they_used_to_read() {
     let prefix = env_prefix();
     for (old, new) in [("EFEMA_VERSION", "VERSION"), ("EFEMA_INSTALL_DIR", "INSTALL_DIR")] {
-        let output = refused_run(old);
-        let said = String::from_utf8_lossy(&output.stderr).into_owned() + &String::from_utf8_lossy(&output.stdout);
-        assert!(!output.status.success(), "with {old} set, the installer went on:\n{said}");
+        let (succeeded, said) = run_installer(&[(old, "v0.9.0")]);
+        assert!(!succeeded, "with {old} set, the installer went on:\n{said}");
         assert!(
             said.contains(&format!("{prefix}_{new}")),
             "with {old} set, the installer does not name {prefix}_{new}:\n{said}"
@@ -70,27 +69,52 @@ fn the_installers_refuse_the_names_they_used_to_read() {
     }
 }
 
+/// The version the release engine pins is the one installed. An installer
+/// that read some other name would install the latest release instead - the
+/// same program, a different number, and a proof that passes or fails by
+/// luck. A pin that is no tag shows it without a download: it is refused,
+/// and by what it says.
+#[test]
+fn the_installers_install_the_version_they_are_given() {
+    let prefix = env_prefix();
+    let (succeeded, said) = run_installer(&[(&format!("{prefix}_VERSION"), "latest-please")]);
+    assert!(!succeeded, "a version that is no tag was installed:\n{said}");
+    assert!(said.contains("'latest-please'"), "the installer does not say which version it refused:\n{said}");
+    assert!(!said.contains("Downloading"), "the installer downloaded instead of refusing the version:\n{said}");
+}
+
+/// Runs the installer of this platform with `env` added - and, should it get
+/// as far as installing, into a scratch directory and off the PATH, so a
+/// broken installer under test cannot touch this machine's own. Whether it
+/// succeeded, and everything it said.
+fn run_installer(env: &[(&str, &str)]) -> (bool, String) {
+    let prefix = env_prefix();
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let mut command = installer_command();
+    for name in ["VERSION", "INSTALL_DIR", "NO_PATH"] {
+        command.env_remove(format!("{prefix}_{name}"));
+    }
+    command.env(format!("{prefix}_INSTALL_DIR"), scratch.path()).env(format!("{prefix}_NO_PATH"), "1");
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    let output = command.output().expect("cannot run the installer");
+    let said = String::from_utf8_lossy(&output.stderr).into_owned() + &String::from_utf8_lossy(&output.stdout);
+    (output.status.success(), said)
+}
+
 #[cfg(unix)]
-fn refused_run(old: &str) -> std::process::Output {
-    Command::new("sh")
-        .arg(root().join("tools").join("install.sh"))
-        .env(old, "v0.9.0")
-        .env_remove("EFEMA_SERVER_VERSION")
-        .env_remove("EFEMA_SERVER_INSTALL_DIR")
-        .output()
-        .expect("cannot run sh")
+fn installer_command() -> Command {
+    let mut command = Command::new("sh");
+    command.arg(root().join("tools").join("install.sh"));
+    command
 }
 
 #[cfg(windows)]
-fn refused_run(old: &str) -> std::process::Output {
-    Command::new("powershell")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
-        .arg(root().join("tools").join("install.ps1"))
-        .env(old, "v0.9.0")
-        .env_remove("EFEMA_SERVER_VERSION")
-        .env_remove("EFEMA_SERVER_INSTALL_DIR")
-        .output()
-        .expect("cannot run powershell")
+fn installer_command() -> Command {
+    let mut command = Command::new("powershell");
+    command.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]).arg(root().join("tools").join("install.ps1"));
+    command
 }
 
 /// Git Bash, MSYS2 and Cygwin all run a `sh` script on Windows. Without a case
