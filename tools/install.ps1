@@ -56,10 +56,19 @@ try {
         throw "The archive $name.zip holds no efema-server.exe"
     }
     New-Item -ItemType Directory -Force $dir | Out-Null
+    # A running efema-server.exe - a relay serving on this machine - cannot be
+    # overwritten, but it can be renamed: the old one steps aside, so an
+    # update does not fail while the relay runs. It is deleted below, or by
+    # the next install once it no longer runs.
+    if (Test-Path $target) {
+        Move-Item $target "$target.old-$([guid]::NewGuid())" -Force
+    }
     Copy-Item $bin.FullName $target -Force
 } finally {
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
+Get-ChildItem $dir -Filter "efema-server.exe.old-*" -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
 
 $version = & $target --version
 

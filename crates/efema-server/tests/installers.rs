@@ -175,3 +175,15 @@ fn the_installers_leave_the_path_alone_when_asked() {
     let note_at = sh.find("to your PATH").expect("install.sh says where the program went");
     assert!(read_at < note_at, "install.sh reads {flag} only after it has talked about the PATH");
 }
+
+/// Windows will not overwrite a program that is running, but it will rename
+/// it. An installer that copies over the old exe fails exactly when it is
+/// needed most: upgrading a relay while it serves.
+#[test]
+fn the_windows_installer_moves_a_running_program_aside() {
+    let ps1 = code("install.ps1");
+    let aside = ps1.find("Move-Item $target").expect("install.ps1 never moves the installed program aside");
+    let copy = ps1.find("Copy-Item").expect("install.ps1 copies the program into place");
+    assert!(aside < copy, "install.ps1 moves the old program aside only after copying over it");
+    assert!(ps1.contains(".exe.old-*"), "install.ps1 never cleans up the programs it moved aside");
+}
