@@ -15,7 +15,46 @@ on:
 permissions: {}
 
 jobs:
+  # Nothing goes to crates.io before the release is out: a release that failed
+  # to build should reach no registry, and `cargo install efema-server` would
+  # otherwise offer a version the installers cannot download yet. Every job
+  # below needs this one.
+  release:
+    name: Wait for the release
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 90
+    steps:
+      - name: Wait for release.yml on the tag's commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          sha=$(gh api "repos/$GH_REPO/commits/$TAG" --jq .sha)
+          started=$(date +%s)
+          while :; do
+            run=$(gh run list --workflow release.yml --commit "$sha" --limit 1 \
+              --json status,conclusion,url --jq '.[0] // {} | "\(.status // "none") \(.conclusion // "none") \(.url // "-")"')
+            read -r status conclusion url <<< "$run"
+            case "$status/$conclusion" in
+              completed/success) echo "release.yml put $TAG out: $url"; exit 0 ;;
+              completed/*) echo "release.yml ended '$conclusion' for $TAG: $url" >&2; exit 1 ;;
+              none/*)
+                if [ $(( $(date +%s) - started )) -gt 600 ]; then
+                  echo "release.yml has not started for $TAG in ten minutes" >&2
+                  exit 1
+                fi
+                ;;
+            esac
+            sleep 30
+          done
+
   crates-io:
+    needs: release
     runs-on: ubuntu-latest
     permissions:
       id-token: write
