@@ -96,20 +96,31 @@ SEQ  EPOCH      SIZE  HASH
 
 ## Install
 
-The relay, on Linux (x86_64 and ARM64) and macOS:
+The relay, on macOS and Linux (x86_64 and ARM64), with Homebrew:
+
+```console
+$ brew install lacodda/tap/efema-server
+```
+
+On Windows, with Scoop:
+
+```console
+> scoop bucket add lacodda https://github.com/lacodda/scoop-bucket
+> scoop install efema-server
+```
+
+Or `cargo install efema-server`, or without a package manager:
 
 ```console
 $ curl -fsSL https://raw.githubusercontent.com/lacodda/efema/main/tools/install.sh | sh
 ```
 
-On Windows:
-
 ```console
 > irm https://raw.githubusercontent.com/lacodda/efema/main/tools/install.ps1 | iex
 ```
 
-Or `cargo install efema-server`. As a service on a Linux server - its own
-user, systemd, upgrades that copy the data aside first - see
+As a service on a Linux server - its own user, systemd, upgrades that copy
+the data aside first - see
 [On a server](https://lacodda.github.io/efema/guides/on-a-server/).
 
 The client, in a Rust app:
