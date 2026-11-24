@@ -29,8 +29,10 @@ pub enum Error {
     Transport(TransportError),
 
     /// The relay does not take the access key: it was revoked, or never
-    /// handed out there. The person needs a key from the relay's operator.
-    #[error("{relay} does not take the access key: it was revoked, or never handed out there")]
+    /// handed out there - or, for a bucket, its credentials ran out and
+    /// nothing handed out the next ones. The person needs a key from the
+    /// relay's operator.
+    #[error("{relay} does not take the access key: it was revoked, it ran out, or it was never handed out there")]
     Unauthorized { relay: String },
     /// The access key reads the stream's space and does not write to it.
     /// Nothing was kept to be sent: a device with such a key only reads.

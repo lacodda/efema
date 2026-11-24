@@ -18,6 +18,7 @@ stops answering.
 | `Error::Unsent`, its source an `Error::Transport` | a push or a send did not get through; what was pushed waits on the device |
 | `Error::Transport` from `pull` or `wait` | the read did not get through; the cursor did not move |
 | `TransportError::Stalled` inside either | nothing moved on the connection for `efema::STALL` (30 seconds) |
+| `TransportError::Credentials` inside either | a bucket's [credentials provider](/efema/guides/temporary-credentials/#when-there-are-none) failed, and none it handed out before still last; nothing was sent |
 | `TransportError::Refused` with `rate_limited` | the device asked more often than its key allows; `retry` says in how many seconds to ask again |
 
 **The app:** send again when it chooses - at its next start, when the
@@ -77,6 +78,15 @@ The device's state does not change with the key: its cursor, its lock and
 what waits to be sent go on as they were. To replace a key without a pause,
 hand out the new one first, then revoke the old:
 `efema-server keys revoke <ID>`.
+
+### A bucket's credentials run out
+
+Credentials handed out for an hour stop signing when the hour is over. A
+`Bucket` given a provider asks it for the next ones before that, and again
+if the bucket refuses the ones it holds - the device notices nothing. One
+given the credentials themselves sees `Error::Unauthorized`; what it pushed
+waits, and goes with the next send of a bucket made with new ones.
+[Temporary credentials](/efema/guides/temporary-credentials/) has both.
 
 ### A device is lost
 

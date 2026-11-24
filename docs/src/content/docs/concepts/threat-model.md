@@ -190,7 +190,10 @@ has no relay, and the bucket stands where the relay stood. Its owner - and the
 service that keeps it - sees what a relay's operator sees: stream names and
 identities in the keys, every batch's position, size and time, and the batch
 keys of the offers. Requests are signed and carry no secret: the credentials'
-secret never crosses the network. Entries are sealed as they are on a relay,
+secret never crosses the network. The session token of
+[temporary credentials](/efema/guides/temporary-credentials/) does, in a
+header of every request - worth what is left of their hour, and only
+together with the secret. Entries are sealed as they are on a relay,
 so nothing kept in the bucket can be read without the stream's key, and the
 stream's key entries in it can be guessed at offline, like any copy of a
 relay's database.

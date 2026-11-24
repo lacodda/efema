@@ -1,0 +1,49 @@
+name: A MinIO to test against
+description: >
+  Starts MinIO on 127.0.0.1:9000 with the bucket the tests write to, credentials
+  that only read it and credentials held to a prefix of it. Reads the names from
+  the job's EFEMA_TEST_BUCKET_* variables.
+
+runs:
+  using: composite
+  steps:
+    # MinIO built from its source by Chainguard - MinIO itself publishes no
+    # images any more. Root inside the container: the image's own user cannot
+    # create the data directory.
+    - name: Start MinIO
+      shell: bash
+      run: |
+        docker run -d --name minio -u 0 -p 127.0.0.1:9000:9000 \
+          -e MINIO_ROOT_USER="$EFEMA_TEST_BUCKET_KEY" -e MINIO_ROOT_PASSWORD="$EFEMA_TEST_BUCKET_SECRET" \
+          cgr.dev/chainguard/minio:latest server /data
+        for _ in $(seq 60); do curl -fs http://127.0.0.1:9000/minio/health/live && exit 0; sleep 1; done
+        docker logs minio
+        exit 1
+    # A user that lists and reads the bucket and writes nothing - the
+    # credentials of a device that only reads - and one that reads and
+    # writes only under the prefix `prefixed/`.
+    - name: Make the bucket, credentials that only read it, and credentials held to a prefix
+      shell: bash
+      run: |
+        cat > "$RUNNER_TEMP/read.json" <<'POLICY'
+        {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": ["s3:GetObject", "s3:ListBucket"],
+         "Resource": ["arn:aws:s3:::efema-test", "arn:aws:s3:::efema-test/*"]}]}
+        POLICY
+        cat > "$RUNNER_TEMP/prefixed.json" <<'POLICY'
+        {"Version": "2012-10-17", "Statement": [
+         {"Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject"], "Resource": ["arn:aws:s3:::efema-test/prefixed/*"]},
+         {"Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": ["arn:aws:s3:::efema-test"],
+          "Condition": {"StringLike": {"s3:prefix": ["prefixed/*"]}}}]}
+        POLICY
+        mc() {
+          docker run --rm --network host -v "$RUNNER_TEMP:/policy" \
+            -e MC_HOST_ci="http://$EFEMA_TEST_BUCKET_KEY:$EFEMA_TEST_BUCKET_SECRET@127.0.0.1:9000" \
+            cgr.dev/chainguard/minio-client:latest "$@"
+        }
+        mc mb ci/efema-test
+        mc admin user add ci "$EFEMA_TEST_BUCKET_READER_KEY" "$EFEMA_TEST_BUCKET_READER_SECRET"
+        mc admin policy create ci efema-read /policy/read.json
+        mc admin policy attach ci efema-read --user "$EFEMA_TEST_BUCKET_READER_KEY"
+        mc admin user add ci "$EFEMA_TEST_BUCKET_PREFIXED_KEY" "$EFEMA_TEST_BUCKET_PREFIXED_SECRET"
+        mc admin policy create ci efema-prefixed /policy/prefixed.json
+        mc admin policy attach ci efema-prefixed --user "$EFEMA_TEST_BUCKET_PREFIXED_KEY"

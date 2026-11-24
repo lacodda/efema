@@ -260,7 +260,7 @@ the app changes its format, it opens the stream with the next epoch:
 
 | Error | What happened | What to do |
 | --- | --- | --- |
-| `Unauthorized` | the relay does not take the key: it was revoked, or never handed out there | ask the operator for a key, and open again with it |
+| `Unauthorized` | the relay does not take the key: it was revoked, or never handed out there - or a bucket's [temporary credentials](/efema/guides/temporary-credentials/) ran out | ask the operator for a key, and open again with it |
 | `ReadOnly` | the key reads the space and does not write to it | nothing for this device to send; a key that writes, if it should |
 | `QuotaExceeded` | the space holds all it may | the operator gives it room; what was pushed waits on the device |
 

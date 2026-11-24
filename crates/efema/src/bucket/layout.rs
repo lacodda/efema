@@ -278,6 +278,7 @@ mod tests {
         says("| `<stream>/stream` |");
         says("| `<stream>/<id>/b/<first, from nines>` |");
         says("| `<stream>/<id>/o/<batch key>/<first>` |");
+        says(&format!("| `{}` |", crate::bucket::sign::TOKEN));
         for header in [LAST, EPOCH, LINK, KEY] {
             says(&format!("| `{header}` |"));
         }

@@ -43,6 +43,24 @@ Every object above except the offers is created with `If-None-Match: *` - and
 only if there is none under its key. The offers are written plainly. Nothing
 is ever deleted.
 
+## Requests
+
+Every request is signed with the credentials' secret - AWS Signature Version
+4, for the service `s3`, the payload's SHA-256 in `x-amz-content-sha256` -
+and carries the signature, never the secret. Temporary credentials add one
+header, signed like the rest:
+
+| Header | Value |
+| --- | --- |
+| `x-amz-security-token` | the session token the credentials were handed out with |
+
+A request refused because of the credentials themselves - `ExpiredToken`,
+`InvalidToken`, `InvalidAccessKeyId` and their kin, or to a `HEAD`, whose
+refusal has no body, any `401` or `403` - was not looked at by the bucket:
+signed with other credentials, it is the same request. `efema::Bucket` asks
+its provider for them and sends it once more
+([Temporary credentials](/efema/guides/temporary-credentials/)).
+
 ## Record
 
 The stream's incarnation, and the layout it is in:

@@ -31,7 +31,9 @@ whole layout.
 
 The credentials are an access key's id and secret, as the service issues them.
 The secret never leaves the device: each request carries a signature made
-with it (Signature Version 4).
+with it (Signature Version 4). Credentials handed out for an hour - with a
+session token, replaced before they run out - are on
+[Temporary credentials](/efema/guides/temporary-credentials/).
 
 ## Open a stream
 
@@ -69,7 +71,8 @@ pull, acknowledge, wait, doctor - word for word.
 
 `mini-vault`, the [example app](/efema/guides/a-synced-folder/), syncs through
 a bucket with `--bucket` and the region; it reads the credentials from the
-variables every S3 tool reads:
+variables every S3 tool reads - `AWS_SESSION_TOKEN` among them, when they
+are temporary:
 
 ```console
 $ export AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… AWS_REGION=us-east-1
@@ -220,7 +223,7 @@ Nothing is ever deleted: the stream only grows, as on a relay.
 | --- | --- | --- |
 | Something to run | nothing | `efema-server`, behind an HTTPS proxy |
 | A waiting device learns of a write | within five seconds | at once |
-| Who can reach the streams | whoever has credentials to the bucket - the service's own policies decide what they may do | an access key per device, to one space, revoked with one command |
+| Who can reach the streams | whoever has credentials to the bucket - the service's own policies decide what they may do, and [for how long](/efema/guides/temporary-credentials/) | an access key per device, to one space, revoked with one command |
 | Limits | the protocol's defaults; no quota the client can see | each key held to the operator's limits, announced |
 | Who sees names, sizes and times | the bucket's owner, and the service | the relay's operator |
 | Who can read the entries | nobody without the stream's key | nobody without the stream's key |
@@ -232,6 +235,8 @@ bucket's owner can and cannot do.
 
 - [A stream in a bucket](/efema/reference/bucket/) - the objects, their keys
   and what each holds.
+- [Temporary credentials](/efema/guides/temporary-credentials/) - a session
+  token, and credentials replaced before they run out.
 - [Moving a stream](/efema/guides/moving-a-stream/) - from a relay into a
   bucket, or back, with the devices going on from where they stood.
 - [Syncing an app](/efema/guides/syncing-an-app/) - the client library.

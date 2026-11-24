@@ -100,7 +100,7 @@ mod transport;
 #[cfg(test)]
 mod vectors;
 
-pub use bucket::{Bucket, Credentials};
+pub use bucket::{Bucket, Credentials, CredentialsProvider};
 pub use client::{Client, Pulled, Received, Secret, Sent};
 pub use copy::{Copied, CopyError, copy};
 pub use doctor::{KeyReport, QUEUE_STALE, RelayReport, Report};

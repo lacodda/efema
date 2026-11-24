@@ -104,9 +104,10 @@ pub(crate) struct Upload {
 }
 
 impl Upload {
-    pub(crate) fn new(body: Vec<u8>, pulse: Pulse, answer_within: Duration) -> Self {
-        let handed_over = answer_within + on_its_way(body.len());
-        Self { rest: Bytes::from(body), pulse, handed_over }
+    pub(crate) fn new(body: impl Into<Bytes>, pulse: Pulse, answer_within: Duration) -> Self {
+        let rest = body.into();
+        let handed_over = answer_within + on_its_way(rest.len());
+        Self { rest, pulse, handed_over }
     }
 }
 

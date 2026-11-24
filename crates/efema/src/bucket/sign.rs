@@ -11,40 +11,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
+use super::credentials::Credentials;
+
 /// The hash of an empty payload, which every request without a body signs.
 pub(crate) const EMPTY_PAYLOAD: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 /// The service every request is signed for.
 const SERVICE: &str = "s3";
 
-/// What a bucket's owner hands out to reach it: an access key's id and its
-/// secret, as S3 and every service that speaks its protocol issue them.
-///
-/// The secret never leaves the device: a request carries a signature made
-/// with it, and nothing prints it - not `Debug`, not an error.
-#[derive(Clone)]
-pub struct Credentials {
-    id: String,
-    secret: String,
-}
-
-impl Credentials {
-    /// The access key `id` with its `secret`.
-    pub fn new(id: impl Into<String>, secret: impl Into<String>) -> Self {
-        Self { id: id.into(), secret: secret.into() }
-    }
-
-    /// The access key's id.
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-}
-
-impl std::fmt::Debug for Credentials {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Credentials({})", self.id)
-    }
-}
+/// The header a session token travels in, signed like the rest: temporary
+/// credentials are an access key, its secret and this.
+pub(crate) const TOKEN: &str = "x-amz-security-token";
 
 /// A moment as a signature names it: `20130524T000000Z`, and the day of it.
 pub(crate) struct Stamp {
@@ -104,12 +81,12 @@ pub(crate) fn authorization(credentials: &Credentials, region: &str, stamp: &Sta
 
     let scope = format!("{}/{region}/{SERVICE}/aws4_request", stamp.date);
     let to_sign = format!("AWS4-HMAC-SHA256\n{}\n{scope}\n{}", stamp.time, hex(&sha256(canonical.as_bytes())));
-    let mut key = hmac(format!("AWS4{}", credentials.secret).as_bytes(), stamp.date.as_bytes());
+    let mut key = hmac(format!("AWS4{}", credentials.secret()).as_bytes(), stamp.date.as_bytes());
     for part in [region, SERVICE, "aws4_request"] {
         key = hmac(&key, part.as_bytes());
     }
     let signature = hex(&hmac(&key, to_sign.as_bytes()));
-    format!("AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders={signed}, Signature={signature}", credentials.id)
+    format!("AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders={signed}, Signature={signature}", credentials.id())
 }
 
 /// The hash of a payload, as `x-amz-content-sha256` carries it.
@@ -294,11 +271,5 @@ mod tests {
             "list-type=2&prefix=a%20b&start-after=notes%2F0a%2Fb%2F9"
         );
         assert_eq!(encode("a/b c~", true), "a/b%20c~");
-    }
-
-    #[test]
-    fn the_secret_is_never_printed() {
-        let (credentials, _) = example();
-        assert_eq!(format!("{credentials:?}"), "Credentials(AKIAIOSFODNN7EXAMPLE)");
     }
 }

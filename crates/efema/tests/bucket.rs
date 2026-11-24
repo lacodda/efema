@@ -8,21 +8,30 @@
 //! read it - `EFEMA_TEST_BUCKET_READER_KEY` and
 //! `EFEMA_TEST_BUCKET_READER_SECRET` - and credentials that read and write
 //! only under the prefix `prefixed/` of it - `EFEMA_TEST_BUCKET_PREFIXED_KEY`
-//! and `EFEMA_TEST_BUCKET_PREFIXED_SECRET`. Without it these tests say they are skipped
+//! and `EFEMA_TEST_BUCKET_PREFIXED_SECRET` - and the service's STS,
+//! `EFEMA_TEST_BUCKET_STS` (`http://127.0.0.1:9000` for MinIO), which hands
+//! out temporary credentials to the same bucket when asked with the first
+//! key. Without it these tests say they are skipped
 //! and pass; with `EFEMA_TEST_BUCKET_REQUIRED` set they fail instead, so the
 //! CI job that runs them against MinIO cannot go green without a bucket.
 //! Every test writes streams of its own, under fresh names.
 
 mod common;
 
+use std::future::Future;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use common::{Device, NEW_PASSPHRASE, PASSPHRASE, TestRelay, contains, data, drain, name, noise};
 use efema::wire::{Batch, Entry, ProblemCode, Watch};
-use efema::{Bucket, Compression, Credentials, Cursor, Epoch, Error, Secret, StreamId, StreamName, Transport, chain};
+use efema::{
+    Bucket, Compression, Credentials, CredentialsProvider, Cursor, Epoch, Error, Secret, StreamId, StreamName,
+    Transport, chain,
+};
 use lacodda_tear::{Cut, Direction, Tear};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Barrier;
 
@@ -82,10 +91,21 @@ impl Settings {
 
     /// The bucket, reached through `proxy` on this machine.
     fn through(&self, proxy: SocketAddr) -> Bucket {
+        self.through_with(proxy, self.credentials())
+    }
+
+    /// The bucket, with whatever hands `credentials` out.
+    fn with(&self, credentials: impl CredentialsProvider) -> Bucket {
+        Bucket::new(self.url.as_str(), &self.region, credentials).unwrap()
+    }
+
+    /// The bucket, reached through `proxy` on this machine with whatever
+    /// hands `credentials` out.
+    fn through_with(&self, proxy: SocketAddr, credentials: impl CredentialsProvider) -> Bucket {
         let mut url = self.url.clone();
         url.set_ip_host(proxy.ip()).unwrap();
         url.set_port(Some(proxy.port())).unwrap();
-        Bucket::new(url.as_str(), &self.region, self.credentials()).unwrap()
+        Bucket::new(url.as_str(), &self.region, credentials).unwrap()
     }
 
     /// Where the bucket's service listens.
@@ -571,6 +591,411 @@ async fn credentials_the_bucket_does_not_take_are_refused() {
     assert_eq!(code, ProblemCode::Unauthorized);
     let refused = Device::new().try_open(wrong, at.fresh("wrong").as_str(), 1, Secret::Passphrase(PASSPHRASE)).await;
     assert!(matches!(refused, Err(Error::Unauthorized { .. })), "{refused:?}");
+}
+
+/// Temporary credentials - an access key, its secret and a session token,
+/// from the service's own STS - sync like the ones held for good. The secret
+/// stays on the device; the token crosses in the one header S3 reads it
+/// from, and nowhere else; and the key and secret without the token are not
+/// taken, so the token is what the bucket let them in by.
+#[tokio::test(flavor = "multi_thread")]
+async fn temporary_credentials_sync_and_keep_their_secret_at_home() {
+    let Some(at) = Settings::from_env() else { return };
+    let sts = Sts::of(&at);
+    let recorder = Proxy::start(at.upstream(), None).await;
+    let stream = at.fresh("temporary");
+    let (first, second) = (sts.assume_role().await, sts.assume_role().await);
+    assert_ne!(first.id, at.id, "STS handed the long-lived key back");
+
+    let laptop = at.through_with(recorder.addr, first.credentials());
+    let on_laptop = Device::new().open(laptop.clone(), stream.as_str(), 1).await;
+    on_laptop.push([b"signed for an hour".as_slice()]).await.unwrap();
+    let on_phone = Device::new().open(at.through_with(recorder.addr, second.credentials()), stream.as_str(), 1).await;
+    assert_eq!(data(&drain(&on_phone).await), [b"signed for an hour".as_slice()]);
+    on_phone.push([b"and answered".as_slice()]).await.unwrap();
+    assert_eq!(drain(&on_laptop).await.len(), 2);
+
+    let traffic = recorder.bytes.lock().unwrap().clone();
+    for secret in [&first.secret, &second.secret, &at.secret] {
+        assert!(!contains(&traffic, secret.as_bytes()), "a secret crossed to the bucket");
+    }
+    for handed in [&first, &second] {
+        let everywhere = count(&traffic, handed.token.as_bytes());
+        let in_its_header = count(&traffic, format!("x-amz-security-token: {}\r\n", handed.token).as_bytes());
+        assert!(in_its_header > 0, "no request carried the session token");
+        assert_eq!(everywhere, in_its_header, "the session token crossed outside its header");
+    }
+    let printed = format!("{laptop:?} {laptop} {:?}", first.credentials());
+    assert!(!printed.contains(&first.secret) && !printed.contains(&first.token), "{printed}");
+    assert!(printed.contains(&first.id), "{printed}");
+
+    let without_token = at.with(Credentials::new(&first.id, &first.secret));
+    let (code, _) = refusal(without_token.read(&stream, None, 10).await);
+    assert_eq!(code, ProblemCode::Unauthorized);
+}
+
+/// The bucket stops taking the credentials a device holds - here a session
+/// token it never knew, as it answers one that ran out or was revoked. The
+/// same `Bucket` asks its provider again, signs the refused request with what
+/// it is handed and goes on: one refusal crossed, and none after it.
+#[tokio::test(flavor = "multi_thread")]
+async fn credentials_the_bucket_stops_taking_are_replaced_on_the_same_bucket() {
+    let Some(at) = Settings::from_env() else { return };
+    let sts = Sts::of(&at);
+    let recorder = Proxy::start(at.upstream(), None).await;
+    let stream = at.fresh("replaced");
+    let (provider, asked) = Asking::new(move |turn| {
+        let sts = sts.clone();
+        async move {
+            let handed = sts.assume_role().await;
+            // What says when it runs out would be replaced ahead of time:
+            // these do not say.
+            Ok(if turn == 1 { handed.not_taken() } else { handed.credentials() })
+        }
+    });
+    let bucket = at.through_with(recorder.addr, provider);
+
+    let written = bucket.append(&stream, &batch(&[b"one"], None)).await.unwrap();
+    assert_eq!((written.first, written.last), (1, 1));
+    assert_eq!(asked.load(Ordering::SeqCst), 2, "the provider was to be asked once more, after the refusal");
+    assert_eq!(refusals(&recorder), 1, "one request was to be refused, and sent again");
+
+    bucket.append(&stream, &batch(&[b"two"], Some(written.stream))).await.unwrap();
+    let within = bucket.clone().within(PREFIXED).unwrap();
+    within.append(&stream, &batch(&[b"under a prefix"], None)).await.unwrap();
+    assert_eq!(texts(&bucket.read(&stream, None, 10).await.unwrap().entries), ["one", "two"]);
+    assert_eq!(asked.load(Ordering::SeqCst), 2, "credentials the bucket takes were asked for again");
+    assert_eq!(refusals(&recorder), 1);
+}
+
+/// Credentials nothing replaces - held as they are, or handed out the same
+/// every time - are refused once and for what they are: the request is not
+/// sent over and over.
+#[tokio::test(flavor = "multi_thread")]
+async fn credentials_nothing_replaces_are_refused_as_they_are() {
+    let Some(at) = Settings::from_env() else { return };
+    let recorder = Proxy::start(at.upstream(), None).await;
+    let handed = Sts::of(&at).assume_role().await;
+    let stream = at.fresh("refused");
+
+    let held = at.through_with(recorder.addr, handed.not_taken());
+    let (code, _) = refusal(held.append(&stream, &batch(&[b"x"], None)).await);
+    assert_eq!(code, ProblemCode::Unauthorized);
+    assert_eq!(refusals(&recorder), 1, "refused credentials that nothing replaced were tried again");
+    let refused = Device::new().try_open(held, stream.as_str(), 1, Secret::Passphrase(PASSPHRASE)).await;
+    assert!(matches!(refused, Err(Error::Unauthorized { .. })), "{refused:?}");
+
+    let before = refusals(&recorder);
+    let same = handed.not_taken();
+    let (provider, asked) = Asking::new(move |_| {
+        let same = same.clone();
+        async move { Ok(same) }
+    });
+    let (code, _) = refusal(at.through_with(recorder.addr, provider).read(&stream, None, 10).await);
+    assert_eq!(code, ProblemCode::Unauthorized);
+    assert_eq!(asked.load(Ordering::SeqCst), 2);
+    assert_eq!(refusals(&recorder) - before, 1);
+}
+
+/// Credentials that say when they run out are replaced ahead of it: once
+/// they have less than five minutes left the bucket asks for the next ones
+/// before it signs, and no request is refused on the way. Ones with longer
+/// to go are not asked for again.
+#[tokio::test(flavor = "multi_thread")]
+async fn credentials_about_to_run_out_are_replaced_before_a_request_is_refused() {
+    let Some(at) = Settings::from_env() else { return };
+    let sts = Sts::of(&at);
+    let recorder = Proxy::start(at.upstream(), None).await;
+    let stream = at.fresh("ahead");
+    let ids = Arc::new(Mutex::new(Vec::new()));
+    let handed_out = ids.clone();
+    let (provider, asked) = Asking::new(move |turn| {
+        let (sts, handed_out) = (sts.clone(), handed_out.clone());
+        async move {
+            let handed = sts.assume_role().await;
+            handed_out.lock().unwrap().push(handed.id.clone());
+            // The first ones are said to have a minute left; the ones after
+            // them, the quarter of an hour they have.
+            let left = if turn == 1 { Duration::from_secs(60) } else { handed.lasts };
+            Ok(handed.credentials().until(SystemTime::now() + left))
+        }
+    });
+    let bucket = at.through_with(recorder.addr, provider);
+
+    let written = bucket.append(&stream, &batch(&[b"one"], None)).await.unwrap();
+    let ids = ids.lock().unwrap().clone();
+    assert!(ids.len() >= 2, "credentials with a minute left signed every request of an append");
+    let traffic = recorder.bytes.lock().unwrap().clone();
+    assert!(
+        contains(&traffic, format!("Credential={}/", ids[ids.len() - 1]).as_bytes()),
+        "the next ones signed nothing"
+    );
+
+    let settled = asked.load(Ordering::SeqCst);
+    bucket.append(&stream, &batch(&[b"two"], Some(written.stream))).await.unwrap();
+    assert_eq!(texts(&bucket.read(&stream, None, 10).await.unwrap().entries), ["one", "two"]);
+    assert_eq!(asked.load(Ordering::SeqCst), settled, "credentials with minutes to spare were asked for again");
+    assert_eq!(refusals(&recorder), 0, "a request was refused on the way");
+}
+
+/// A provider that cannot hand credentials out fails the request with its
+/// own reason, before anything is sent - and the same `Bucket` works once
+/// the provider does.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provider_that_fails_sends_nothing_and_is_asked_again() {
+    let Some(at) = Settings::from_env() else { return };
+    let sts = Sts::of(&at);
+    let recorder = Proxy::start(at.upstream(), None).await;
+    let stream = at.fresh("provider");
+    let (provider, asked) = Asking::new(move |turn| {
+        let sts = sts.clone();
+        async move {
+            if turn == 1 {
+                return Err("the backend that hands credentials out is down".into());
+            }
+            Ok(sts.assume_role().await.credentials())
+        }
+    });
+    let bucket = at.through_with(recorder.addr, provider);
+
+    let failed = bucket.append(&stream, &batch(&[b"one"], None)).await.unwrap_err();
+    assert!(matches!(&failed, efema::TransportError::Credentials { .. }), "{failed:?}");
+    let source = std::error::Error::source(&failed).map(ToString::to_string);
+    assert_eq!(source.as_deref(), Some("the backend that hands credentials out is down"));
+    assert!(matches!(Error::from(failed), Error::Transport(_)), "not something to try again later");
+    assert!(recorder.bytes.lock().unwrap().is_empty(), "a request went out with no credentials to sign it");
+
+    bucket.append(&stream, &batch(&[b"one"], None)).await.unwrap();
+    assert_eq!(asked.load(Ordering::SeqCst), 2);
+}
+
+/// The real thing, at the pace the service sets: STS hands credentials out
+/// for no less than a quarter of an hour, so this test takes that long and
+/// runs only when asked to (`--ignored`; in CI, the job `bucket (credentials
+/// run out)`). Credentials that ran out do not write. A bucket whose
+/// provider says when they run out has the next ones before any request is
+/// refused; one whose provider does not say is refused once, asks, and
+/// writes - both without being made again.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "takes the quarter of an hour that the shortest credentials of STS last"]
+async fn credentials_that_ran_out_do_not_write_and_the_next_ones_do() {
+    let Some(at) = Settings::from_env() else { return };
+    let sts = Sts::of(&at);
+    let stream = at.fresh("ran-out");
+    let first = sts.assume_role().await;
+    let handed_at = Instant::now();
+
+    let held = at.with(first.credentials());
+    let (telling, quiet) = (Proxy::start(at.upstream(), None).await, Proxy::start(at.upstream(), None).await);
+    let provider = |says_when: bool| {
+        let (sts, first) = (sts.clone(), first.clone());
+        Asking::new(move |turn| {
+            let (sts, first) = (sts.clone(), first.clone());
+            async move {
+                let handed = if turn == 1 { first } else { sts.assume_role().await };
+                let credentials = handed.credentials();
+                Ok(if says_when { credentials.until(handed.expires) } else { credentials })
+            }
+        })
+    };
+    let (says, said) = provider(true);
+    let (silent, asked) = provider(false);
+    let (ahead, behind) = (at.through_with(telling.addr, says), at.through_with(quiet.addr, silent));
+
+    let written = held.append(&stream, &batch(&[b"while they last"], None)).await.unwrap();
+    ahead.append(&stream, &batch(&[b"ahead"], Some(written.stream))).await.unwrap();
+    behind.append(&stream, &batch(&[b"behind"], Some(written.stream))).await.unwrap();
+    assert_eq!((said.load(Ordering::SeqCst), asked.load(Ordering::SeqCst)), (1, 1));
+
+    tokio::time::sleep((first.lasts + Duration::from_secs(5)).saturating_sub(handed_at.elapsed())).await;
+
+    let (code, problem) = refusal(held.append(&stream, &batch(&[b"too late"], Some(written.stream))).await);
+    assert_eq!(code, ProblemCode::Unauthorized, "{problem:?}");
+    let (code, _) = refusal(held.read(&stream, None, 10).await);
+    assert_eq!(code, ProblemCode::Unauthorized);
+
+    ahead.append(&stream, &batch(&[b"ahead again"], Some(written.stream))).await.unwrap();
+    assert_eq!(said.load(Ordering::SeqCst), 2);
+    assert_eq!(refusals(&telling), 0, "credentials known to have run out signed a request");
+
+    behind.append(&stream, &batch(&[b"behind again"], Some(written.stream))).await.unwrap();
+    assert_eq!(asked.load(Ordering::SeqCst), 2);
+    assert_eq!(refusals(&quiet), 1, "one request was to be refused, and sent again");
+
+    assert_eq!(
+        texts(&everything(&at, &stream, 100).await),
+        ["while they last", "ahead", "behind", "ahead again", "behind again"]
+    );
+}
+
+/// How many times `needle` is in `haystack`.
+fn count(haystack: &[u8], needle: &[u8]) -> usize {
+    haystack.windows(needle.len()).filter(|window| *window == needle).count()
+}
+
+/// How many requests through `proxy` the bucket refused as not allowed.
+fn refusals(proxy: &Proxy) -> usize {
+    count(&proxy.bytes.lock().unwrap(), b"HTTP/1.1 403 ")
+}
+
+type Failure = Box<dyn std::error::Error + Send + Sync>;
+
+/// A provider that answers with `answer`, told which asking this is - the
+/// first, the second - and counts them.
+struct Asking<F> {
+    answer: F,
+    asked: Arc<AtomicUsize>,
+}
+
+impl<F> Asking<F> {
+    fn new(answer: F) -> (Self, Arc<AtomicUsize>) {
+        let asked = Arc::new(AtomicUsize::new(0));
+        (Self { answer, asked: asked.clone() }, asked)
+    }
+}
+
+impl<F, Answer> CredentialsProvider for Asking<F>
+where
+    F: Fn(usize) -> Answer + Send + Sync + 'static,
+    Answer: Future<Output = Result<Credentials, Failure>> + Send,
+{
+    fn credentials(&self) -> impl Future<Output = Result<Credentials, Failure>> + Send {
+        (self.answer)(self.asked.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+}
+
+/// The STS of the bucket's service, asked the way an app's backend asks it:
+/// `AssumeRole`, signed with the long-lived key, for credentials that last
+/// as short as STS lets them.
+#[derive(Clone)]
+struct Sts {
+    url: reqwest::Url,
+    region: String,
+    id: String,
+    secret: String,
+}
+
+/// What STS handed out.
+#[derive(Clone)]
+struct Handed {
+    id: String,
+    secret: String,
+    token: String,
+    /// How long they last, counted from before they were asked for.
+    lasts: Duration,
+    expires: SystemTime,
+}
+
+impl Handed {
+    fn credentials(&self) -> Credentials {
+        Credentials::new(&self.id, &self.secret).with_token(&self.token)
+    }
+
+    /// The same key and secret with a session token the service never
+    /// handed out - what a token is to it once it ran out or was revoked.
+    fn not_taken(&self) -> Credentials {
+        let mut token = self.token.clone();
+        let last = token.pop().unwrap();
+        token.push(if last == 'A' { 'B' } else { 'A' });
+        Credentials::new(&self.id, &self.secret).with_token(token)
+    }
+}
+
+impl Sts {
+    /// The shortest STS hands credentials out for.
+    const SHORTEST: Duration = Duration::from_secs(900);
+
+    fn of(at: &Settings) -> Self {
+        let url = std::env::var("EFEMA_TEST_BUCKET_STS").expect("EFEMA_TEST_BUCKET needs EFEMA_TEST_BUCKET_STS");
+        Self {
+            url: url.parse().expect("EFEMA_TEST_BUCKET_STS is an address"),
+            region: at.region.clone(),
+            id: at.id.clone(),
+            secret: at.secret.clone(),
+        }
+    }
+
+    async fn assume_role(&self) -> Handed {
+        let asked = SystemTime::now();
+        let body = format!("Action=AssumeRole&Version=2011-06-15&DurationSeconds={}", Self::SHORTEST.as_secs());
+        let host = match self.url.port() {
+            Some(port) => format!("{}:{port}", self.url.host_str().unwrap()),
+            None => self.url.host_str().unwrap().to_string(),
+        };
+        let seconds = asked.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+        let (date, time) = moment(seconds);
+        let hash = |bytes: &[u8]| hex(&Sha256::digest(bytes));
+        let canonical =
+            format!("POST\n/\n\nhost:{host}\nx-amz-date:{time}\n\nhost;x-amz-date\n{}", hash(body.as_bytes()));
+        let scope = format!("{date}/{}/sts/aws4_request", self.region);
+        let to_sign = format!("AWS4-HMAC-SHA256\n{time}\n{scope}\n{}", hash(canonical.as_bytes()));
+        let mut key = hmac(format!("AWS4{}", self.secret).as_bytes(), date.as_bytes());
+        for part in [self.region.as_str(), "sts", "aws4_request"] {
+            key = hmac(&key, part.as_bytes());
+        }
+        let signature = hex(&hmac(&key, to_sign.as_bytes()));
+        let answer = reqwest::Client::new()
+            .post(self.url.clone())
+            .header("x-amz-date", &time)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header(
+                "authorization",
+                format!(
+                    "AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders=host;x-amz-date, Signature={signature}",
+                    self.id
+                ),
+            )
+            .body(body)
+            .send()
+            .await
+            .expect("STS is reached");
+        let (status, text) = (answer.status(), answer.text().await.unwrap());
+        assert!(status.is_success(), "STS answered {status}: {text}");
+        let field = |name: &str| {
+            let (open, close) = (format!("<{name}>"), format!("</{name}>"));
+            let from = text.find(&open).unwrap_or_else(|| panic!("STS said no {name}: {text}")) + open.len();
+            text[from..from + text[from..].find(&close).unwrap()].to_string()
+        };
+        Handed {
+            id: field("AccessKeyId"),
+            secret: field("SecretAccessKey"),
+            token: field("SessionToken"),
+            lasts: Self::SHORTEST,
+            expires: asked + Self::SHORTEST,
+        }
+    }
+}
+
+/// A moment as a signature names it: its day, and its time.
+fn moment(seconds: u64) -> (String, String) {
+    // Howard Hinnant's `civil_from_days`.
+    let z = (seconds / 86_400) as i64 + 719_468;
+    let (era, of_era) = (z.div_euclid(146_097), z.rem_euclid(146_097));
+    let year_of_era = (of_era - of_era / 1460 + of_era / 36_524 - of_era / 146_096) / 365;
+    let of_year = of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted = (5 * of_year + 2) / 153;
+    let day = of_year - (153 * shifted + 2) / 5 + 1;
+    let month = if shifted < 10 { shifted + 3 } else { shifted - 9 };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    let date = format!("{year:04}{month:02}{day:02}");
+    let of_day = seconds % 86_400;
+    let time = format!("{date}T{:02}{:02}{:02}Z", of_day / 3600, of_day % 3600 / 60, of_day % 60);
+    (date, time)
+}
+
+fn hmac(key: &[u8], message: &[u8]) -> [u8; 32] {
+    let mut block = [0u8; 64];
+    if key.len() > 64 {
+        block[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+    let inner: [u8; 32] = Sha256::new().chain_update(block.map(|b| b ^ 0x36)).chain_update(message).finalize().into();
+    Sha256::new().chain_update(block.map(|b| b ^ 0x5c)).chain_update(inner).finalize().into()
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A batch that says which position it starts at lands there or nowhere,

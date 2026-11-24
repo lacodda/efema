@@ -98,6 +98,17 @@ pub enum TransportError {
         /// The version it is in.
         version: u32,
     },
+    /// The credentials to reach a bucket with could not be had: its
+    /// [`CredentialsProvider`](crate::CredentialsProvider) failed, and none
+    /// it handed out before still last. Worth trying again later.
+    #[error("no credentials to reach {at} with")]
+    Credentials {
+        /// The bucket.
+        at: String,
+        /// What the provider said.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     /// Something answered, but not in the protocol: not an efema relay, or a
     /// proxy in front of it answering for itself.
     #[error("{at} answered something that is not the efema protocol: {reason}")]

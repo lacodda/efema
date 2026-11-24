@@ -5,6 +5,7 @@
 //! the one thing S3 does atomically: creating an object only if there is
 //! none under its key. The layout that rests on it is in [`layout`].
 
+mod credentials;
 pub(crate) mod layout;
 mod sign;
 mod xml;
@@ -14,6 +15,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
+use bytes::Bytes;
 use efema_proto::wire::{self, Batch, Head, Heads, Limits, Page, Problem, ProblemCode, Watch, Written};
 use efema_proto::{Cursor, Epoch, Hash, StreamId, StreamName, chain, limits};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
@@ -25,8 +27,9 @@ use crate::Part;
 use crate::relay::{CONNECT_TIMEOUT, InvalidUrl, address};
 use crate::stall::{Pulse, STALL, Upload};
 use crate::transport::{Transport, TransportError};
+pub use credentials::{Credentials, CredentialsProvider};
+use credentials::{Held, Keeper, ProviderError};
 use layout::{Record, Stored, Summary};
-pub use sign::Credentials;
 
 /// How many places one batch may try before the append gives up: every
 /// place it loses is a batch another writer put there, so this many is a
@@ -50,8 +53,11 @@ const LIMITS: Limits = Limits { write: true, quota: u64::MAX, used: 0, rate: u64
 
 /// A bucket of S3 - Amazon's, or any service that speaks its protocol
 /// (Cloudflare R2, MinIO, and others) - with the credentials its owner
-/// handed out. Streams live in it as objects, sealed like on a relay: the
-/// bucket's owner sees names, sizes and times, and none of what was written.
+/// handed out: [`Credentials`] held for good, or a [`CredentialsProvider`]
+/// that hands out ones that last an hour, which the bucket asks again
+/// before they run out. Streams live in it as objects, sealed like on a
+/// relay: the bucket's owner sees names, sizes and times, and none of what
+/// was written.
 ///
 /// The bucket must refuse to create an object that is already there
 /// (`If-None-Match: *`) and show a write to every read after it. Amazon S3
@@ -97,7 +103,8 @@ struct Inner {
     /// The host as a request names it, port and all.
     host: String,
     region: String,
-    credentials: Credentials,
+    /// Shared with every prefix of the bucket.
+    credentials: Arc<Keeper>,
     http: reqwest::Client,
     /// Set once the bucket was seen to refuse a second creation, and the
     /// credentials to write.
@@ -125,6 +132,36 @@ impl Answer {
     fn header(&self, name: &str) -> Option<&str> {
         self.headers.get(name).and_then(|value| value.to_str().ok())
     }
+
+    /// The code S3 refused with, if the answer is a refusal that says.
+    fn code(&self) -> Option<String> {
+        xml::first(std::str::from_utf8(&self.body).unwrap_or_default(), "Code")
+    }
+
+    /// Whether the bucket refused the credentials themselves, rather than
+    /// what they were used for: a code that says so - or, where a refusal
+    /// has no body to say anything, as to `HEAD`, the status alone.
+    fn refuses_credentials(&self) -> bool {
+        match self.code() {
+            Some(code) => not_taken(&code),
+            None => self.body.is_empty() && matches!(self.status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN),
+        }
+    }
+}
+
+/// Whether `code` is S3 refusing the credentials a request was signed with:
+/// unknown, run out, revoked, or not the ones that made the signature.
+fn not_taken(code: &str) -> bool {
+    matches!(
+        code,
+        "InvalidAccessKeyId"
+            | "SignatureDoesNotMatch"
+            | "RequestTimeTooSkewed"
+            | "ExpiredToken"
+            | "InvalidToken"
+            | "InvalidTokenId"
+            | "TokenRefreshRequired"
+    )
 }
 
 /// How a creation went.
@@ -145,14 +182,15 @@ impl Bucket {
     /// How often a wait looks at the bucket again.
     pub const POLL: Duration = Duration::from_secs(5);
 
-    /// The bucket at `url`, in `region`, reached with `credentials`:
-    /// `https://`, or `http://` to this machine.
+    /// The bucket at `url`, in `region`, reached with `credentials` -
+    /// [`Credentials`], or what hands them out: `https://`, or `http://` to
+    /// this machine.
     ///
     /// # Errors
     ///
     /// [`InvalidUrl`] when `url` is not an HTTP address, is plain HTTP to
     /// another machine, or `region` is not a region's name.
-    pub fn new(url: &str, region: &str, credentials: Credentials) -> Result<Self, InvalidUrl> {
+    pub fn new(url: &str, region: &str, credentials: impl CredentialsProvider) -> Result<Self, InvalidUrl> {
         const WHAT: &str = "a bucket address";
         let parsed = address(url, WHAT)?;
         if region.is_empty() || !region.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
@@ -177,7 +215,7 @@ impl Bucket {
             prefix: String::new(),
             host,
             region: region.to_string(),
-            credentials,
+            credentials: Arc::new(Keeper::new(credentials)),
             http,
             probed: OnceCell::new(),
             known: Mutex::new(Known::default()),
@@ -227,6 +265,7 @@ impl Bucket {
             prefix: format!("{}{trimmed}/", inner.prefix),
             host: inner.host.clone(),
             region: inner.region.clone(),
+            // One provider, asked once for the bucket and all its prefixes.
             credentials: inner.credentials.clone(),
             http: inner.http.clone(),
             // What was learnt of the bucket was learnt of its root: the
@@ -247,15 +286,40 @@ impl Bucket {
 
     /// Sends a signed request - to the object `key`, or to the bucket - and
     /// reads the answer whole, giving up once nothing has moved for
-    /// [`STALL`].
+    /// [`STALL`]. Signed with the credentials held; refused as signed with
+    /// credentials the bucket does not take, it is sent once more if the
+    /// provider hands out other ones.
     async fn call(
         &self,
         method: Method,
         key: Option<&str>,
         query: &[(&str, &str)],
-        mut headers: Vec<(String, String)>,
+        headers: Vec<(String, String)>,
         body: Option<Vec<u8>>,
     ) -> Result<Answer, TransportError> {
+        let body = body.map(Bytes::from);
+        let held = self.0.credentials.current(SystemTime::now()).await.map_err(|e| self.no_credentials(e))?;
+        let answer = self.signed(&held, method.clone(), key, query, headers.clone(), body.clone()).await?;
+        if !answer.refuses_credentials() {
+            return Ok(answer);
+        }
+        match self.0.credentials.instead_of(&held).await.map_err(|e| self.no_credentials(e))? {
+            Some(other) => self.signed(&other, method, key, query, headers, body).await,
+            None => Ok(answer),
+        }
+    }
+
+    /// Sends a request signed with `held`, and reads the answer whole.
+    async fn signed(
+        &self,
+        held: &Held,
+        method: Method,
+        key: Option<&str>,
+        query: &[(&str, &str)],
+        mut headers: Vec<(String, String)>,
+        body: Option<Bytes>,
+    ) -> Result<Answer, TransportError> {
+        let credentials = &*held.credentials;
         let path = match key {
             Some(key) => format!("{}/{}", self.0.path, sign::encode(&format!("{}{key}", self.0.prefix), true)),
             None if self.0.path.is_empty() => "/".to_string(),
@@ -267,8 +331,11 @@ impl Bucket {
         headers.push(("x-amz-date".to_string(), stamp.time.clone()));
         headers.push(("x-amz-content-sha256".to_string(), payload.clone()));
         headers.push(("host".to_string(), self.0.host.clone()));
+        if let Some(token) = credentials.token() {
+            headers.push((sign::TOKEN.to_string(), token.to_string()));
+        }
         let signed = sign::authorization(
-            &self.0.credentials,
+            credentials,
             &self.0.region,
             &stamp,
             &sign::Request {
@@ -287,6 +354,11 @@ impl Bucket {
 
         let mut request = self.0.http.request(method, url);
         for (name, value) in headers.iter().filter(|(name, _)| name != "host") {
+            let mut value = HeaderValue::from_str(value).map_err(|_| match name.as_str() {
+                sign::TOKEN => self.no_credentials("the session token is not text a header carries".into()),
+                _ => self.not_protocol(format!("{name} is not text a header carries")),
+            })?;
+            value.set_sensitive(name == sign::TOKEN);
             request = request.header(name, value);
         }
         let mut authorization = HeaderValue::from_str(&signed).expect("a signature is printable ASCII");
@@ -322,6 +394,10 @@ impl Bucket {
         TransportError::Unreachable { at: self.base(), source: Box::new(source.without_url()) }
     }
 
+    fn no_credentials(&self, source: ProviderError) -> TransportError {
+        TransportError::Credentials { at: self.base(), source }
+    }
+
     fn not_protocol(&self, reason: String) -> TransportError {
         TransportError::NotProtocol { at: self.base(), reason }
     }
@@ -333,12 +409,12 @@ impl Bucket {
     /// What an answer that is not a success says, in the protocol's terms.
     fn refused(&self, answer: &Answer) -> TransportError {
         let text = std::str::from_utf8(&answer.body).unwrap_or_default();
-        let code = xml::first(text, "Code");
+        let code = answer.code();
         let message = xml::first(text, "Message").unwrap_or_else(|| format!("{} from the bucket", answer.status));
         let status = answer.status;
         let ours = match code.as_deref() {
             Some("NoSuchBucket") => ProblemCode::NotFound,
-            Some("InvalidAccessKeyId" | "SignatureDoesNotMatch" | "RequestTimeTooSkewed") => ProblemCode::Unauthorized,
+            Some(code) if not_taken(code) => ProblemCode::Unauthorized,
             Some("AccessDenied" | "AllAccessDisabled") => ProblemCode::Forbidden,
             Some("SlowDown" | "TooManyRequests") => ProblemCode::RateLimited,
             Some(other) if !status.is_server_error() => ProblemCode::Other(other.to_string()),
@@ -367,10 +443,7 @@ impl Bucket {
         }
         // An answer to HEAD has no body to say which thing is missing; a
         // missing bucket shows on the GETs every read and wait begins with.
-        let missing = answer.status == StatusCode::NOT_FOUND
-            && (head
-                || xml::first(std::str::from_utf8(&answer.body).unwrap_or_default(), "Code").as_deref()
-                    == Some("NoSuchKey"));
+        let missing = answer.status == StatusCode::NOT_FOUND && (head || answer.code().as_deref() == Some("NoSuchKey"));
         if missing { Ok(None) } else { Err(self.refused(&answer)) }
     }
 
@@ -998,12 +1071,36 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn neither_the_secret_nor_the_token_is_in_what_a_bucket_prints() {
+        let temporary = credentials().with_token("AQoDYXdzEJr-session-token");
+        let bucket = Bucket::new("https://notes.example.com", "auto", temporary).unwrap();
+        assert_eq!(format!("{bucket:?}"), "Bucket(https://notes.example.com, no credentials asked for yet)");
+        let within = bucket.clone().within("apps/notes").unwrap();
+        within.0.credentials.current(SystemTime::now()).await.unwrap();
+        // What a prefix asked for, the bucket holds.
+        let printed = format!("{bucket:?} {bucket} {within:?}");
+        assert!(!printed.contains("EXAMPLEKEY") && !printed.contains("session-token"), "{printed}");
+        assert_eq!(printed.matches("Credentials(AKIDEXAMPLE, with a session token)").count(), 2, "{printed}");
+    }
+
     #[test]
-    fn the_secret_is_not_in_what_a_bucket_prints() {
-        let bucket = Bucket::new("https://notes.example.com", "auto", credentials()).unwrap();
-        let printed = format!("{bucket:?} {bucket}");
-        assert!(!printed.contains("EXAMPLEKEY"), "{printed}");
-        assert!(printed.contains("AKIDEXAMPLE"), "{printed}");
+    fn a_refusal_of_the_credentials_is_told_from_a_refusal_of_what_they_do() {
+        let error = |code: &str| format!("<Error><Code>{code}</Code><Message>m</Message></Error>");
+        for code in ["ExpiredToken", "InvalidTokenId", "InvalidToken", "InvalidAccessKeyId", "TokenRefreshRequired"] {
+            assert!(answer(403, &error(code)).refuses_credentials(), "{code}");
+            assert!(answer(400, &error(code)).refuses_credentials(), "{code}");
+        }
+        for code in ["AccessDenied", "NoSuchKey", "SlowDown", "PreconditionFailed"] {
+            assert!(!answer(403, &error(code)).refuses_credentials(), "{code}");
+        }
+        // An answer to HEAD says nothing but its status.
+        assert!(answer(403, "").refuses_credentials());
+        assert!(answer(401, "").refuses_credentials());
+        for status in [200, 404, 412, 500, 503] {
+            assert!(!answer(status, "").refuses_credentials(), "{status}");
+        }
+        assert!(!answer(403, "<html>a proxy's own page</html>").refuses_credentials());
     }
 
     fn answer(status: u16, body: &str) -> Answer {
@@ -1026,6 +1123,8 @@ mod tests {
         assert_eq!(code(&bucket, 403, &error("SignatureDoesNotMatch")), Some(ProblemCode::Unauthorized));
         assert_eq!(code(&bucket, 403, &error("InvalidAccessKeyId")), Some(ProblemCode::Unauthorized));
         assert_eq!(code(&bucket, 403, &error("RequestTimeTooSkewed")), Some(ProblemCode::Unauthorized));
+        assert_eq!(code(&bucket, 400, &error("ExpiredToken")), Some(ProblemCode::Unauthorized));
+        assert_eq!(code(&bucket, 403, &error("InvalidTokenId")), Some(ProblemCode::Unauthorized));
         assert_eq!(code(&bucket, 404, &error("NoSuchBucket")), Some(ProblemCode::NotFound));
         assert_eq!(code(&bucket, 503, &error("SlowDown")), Some(ProblemCode::RateLimited));
         assert_eq!(code(&bucket, 501, &error("NotImplemented")), Some(ProblemCode::Internal));

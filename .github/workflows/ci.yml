@@ -62,11 +62,12 @@ jobs:
       - name: 5080 files up and down
         run: cargo run --release -p mini-vault --example first-sync -- --limit 30
 
-  # The bucket transport against a real S3: MinIO, built from its source by
-  # Chainguard - MinIO itself publishes no images any more. The bucket tests
-  # skip themselves where there is no bucket; EFEMA_TEST_BUCKET_REQUIRED makes
-  # that a failure here, so this job cannot go green without running them. The
-  # first sync goes through the same bucket, held to the relay's limit.
+  # The bucket transport against a real S3: MinIO (.github/actions/minio).
+  # The bucket tests skip themselves where there is no bucket;
+  # EFEMA_TEST_BUCKET_REQUIRED makes that a failure here, so this job cannot go
+  # green without running them. Temporary credentials come from MinIO's own
+  # STS, asked with the first key. The first sync goes through the same bucket
+  # with credentials of that kind, held to the relay's limit.
   bucket:
     name: bucket (MinIO)
     runs-on: ubuntu-latest
@@ -79,55 +80,56 @@ jobs:
       EFEMA_TEST_BUCKET_READER_SECRET: not-a-secret-either
       EFEMA_TEST_BUCKET_PREFIXED_KEY: efema-prefixed
       EFEMA_TEST_BUCKET_PREFIXED_SECRET: not-a-secret-at-all
+      EFEMA_TEST_BUCKET_STS: http://127.0.0.1:9000
       EFEMA_TEST_BUCKET_REQUIRED: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Root inside the container: the image's own user cannot create the
-      # data directory.
-      - name: Start MinIO
-        run: |
-          docker run -d --name minio -u 0 -p 127.0.0.1:9000:9000 \
-            -e MINIO_ROOT_USER="$EFEMA_TEST_BUCKET_KEY" -e MINIO_ROOT_PASSWORD="$EFEMA_TEST_BUCKET_SECRET" \
-            cgr.dev/chainguard/minio:latest server /data
-          for _ in $(seq 60); do curl -fs http://127.0.0.1:9000/minio/health/live && exit 0; sleep 1; done
-          docker logs minio
-          exit 1
-      # A user that lists and reads the bucket and writes nothing - the
-      # credentials of a device that only reads - and one that reads and
-      # writes only under the prefix `prefixed/`.
-      - name: Make the bucket, credentials that only read it, and credentials held to a prefix
-        run: |
-          cat > "$RUNNER_TEMP/read.json" <<'POLICY'
-          {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": ["s3:GetObject", "s3:ListBucket"],
-           "Resource": ["arn:aws:s3:::efema-test", "arn:aws:s3:::efema-test/*"]}]}
-          POLICY
-          cat > "$RUNNER_TEMP/prefixed.json" <<'POLICY'
-          {"Version": "2012-10-17", "Statement": [
-           {"Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject"], "Resource": ["arn:aws:s3:::efema-test/prefixed/*"]},
-           {"Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": ["arn:aws:s3:::efema-test"],
-            "Condition": {"StringLike": {"s3:prefix": ["prefixed/*"]}}}]}
-          POLICY
-          mc() {
-            docker run --rm --network host -v "$RUNNER_TEMP:/policy" \
-              -e MC_HOST_ci="http://$EFEMA_TEST_BUCKET_KEY:$EFEMA_TEST_BUCKET_SECRET@127.0.0.1:9000" \
-              cgr.dev/chainguard/minio-client:latest "$@"
-          }
-          mc mb ci/efema-test
-          mc admin user add ci "$EFEMA_TEST_BUCKET_READER_KEY" "$EFEMA_TEST_BUCKET_READER_SECRET"
-          mc admin policy create ci efema-read /policy/read.json
-          mc admin policy attach ci efema-read --user "$EFEMA_TEST_BUCKET_READER_KEY"
-          mc admin user add ci "$EFEMA_TEST_BUCKET_PREFIXED_KEY" "$EFEMA_TEST_BUCKET_PREFIXED_SECRET"
-          mc admin policy create ci efema-prefixed /policy/prefixed.json
-          mc admin policy attach ci efema-prefixed --user "$EFEMA_TEST_BUCKET_PREFIXED_KEY"
+      - uses: ./.github/actions/minio
       - name: Test against the bucket
         run: cargo test -p efema --test bucket
-      - name: 5080 files up and down through the bucket
-        run: cargo run --release -p mini-vault --example first-sync -- --bucket "$EFEMA_TEST_BUCKET" --region us-east-1 --limit 30
-        env:
-          AWS_ACCESS_KEY_ID: ${{ env.EFEMA_TEST_BUCKET_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ env.EFEMA_TEST_BUCKET_SECRET }}
+      # MinIO takes no role's name and hands out its own user's rights; the
+      # ARN is the one its documentation asks for.
+      - name: 5080 files up and down through the bucket, with temporary credentials
+        run: |
+          handed="$(AWS_ACCESS_KEY_ID="$EFEMA_TEST_BUCKET_KEY" AWS_SECRET_ACCESS_KEY="$EFEMA_TEST_BUCKET_SECRET" \
+            aws sts assume-role --endpoint-url "$EFEMA_TEST_BUCKET_STS" --region us-east-1 \
+              --role-arn arn:xxx:xxx:xxx:xxxx --role-session-name first-sync --output json)"
+          export AWS_ACCESS_KEY_ID="$(jq -r .Credentials.AccessKeyId <<<"$handed")"
+          export AWS_SECRET_ACCESS_KEY="$(jq -r .Credentials.SecretAccessKey <<<"$handed")"
+          export AWS_SESSION_TOKEN="$(jq -r .Credentials.SessionToken <<<"$handed")"
+          test -n "$AWS_SESSION_TOKEN" -a "$AWS_ACCESS_KEY_ID" != "$EFEMA_TEST_BUCKET_KEY"
+          cargo run --release -p mini-vault --example first-sync -- --bucket "$EFEMA_TEST_BUCKET" --region us-east-1 --limit 30
+
+  # Credentials that run out, at the pace the service sets: STS hands nothing
+  # out for less than a quarter of an hour, so the one test that waits for
+  # real credentials to run out takes that long - and has this job to itself,
+  # beside the others rather than after them. `--ignored` runs it and nothing
+  # else; `--exact` names it, so the job fails if the test is renamed away.
+  bucket-credentials:
+    name: bucket (credentials run out)
+    runs-on: ubuntu-latest
+    env:
+      EFEMA_TEST_BUCKET: http://127.0.0.1:9000/efema-test
+      EFEMA_TEST_BUCKET_REGION: us-east-1
+      EFEMA_TEST_BUCKET_KEY: efema-ci
+      EFEMA_TEST_BUCKET_SECRET: not-a-secret-a-throwaway-minio
+      EFEMA_TEST_BUCKET_READER_KEY: efema-reader
+      EFEMA_TEST_BUCKET_READER_SECRET: not-a-secret-either
+      EFEMA_TEST_BUCKET_PREFIXED_KEY: efema-prefixed
+      EFEMA_TEST_BUCKET_PREFIXED_SECRET: not-a-secret-at-all
+      EFEMA_TEST_BUCKET_STS: http://127.0.0.1:9000
+      EFEMA_TEST_BUCKET_REQUIRED: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/minio
+      - name: Wait for credentials to run out, and write with the next ones
+        run: |
+          cargo test -p efema --test bucket -- --ignored --exact credentials_that_ran_out_do_not_write_and_the_next_ones_do 2>&1 | tee "$RUNNER_TEMP/ran-out.log"
+          grep -q '^test result: ok. 1 passed' "$RUNNER_TEMP/ran-out.log"
 
   # rust-version is a promise to anyone running `cargo install`. Without a job
   # that actually builds on it, the number silently rots the first time a new
@@ -179,6 +181,7 @@ jobs:
       - check
       - first-sync
       - bucket
+      - bucket-credentials
       - msrv
       - vectors
     runs-on: ubuntu-latest

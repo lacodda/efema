@@ -79,7 +79,7 @@ device's app says the relay does not take its key:
 
 ```console
 $ mini-vault --relay http://127.0.0.1:2451 --folder ./phone --state ./phone-state sync --once
-error: http://127.0.0.1:2451 does not take the access key: it was revoked, or never handed out there
+error: http://127.0.0.1:2451 does not take the access key: it was revoked, it ran out, or it was never handed out there
 ```
 
 The space and its streams stay, and so do the other keys to it.
