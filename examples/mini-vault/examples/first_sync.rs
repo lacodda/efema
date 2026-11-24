@@ -17,7 +17,8 @@
 //! `--relay` or `--bucket`, it starts a relay of its own in a temporary
 //! folder. With `--relay`, the access key comes from `FIRST_SYNC_KEY`; with
 //! `--bucket`, the bucket's credentials from `AWS_ACCESS_KEY_ID` and
-//! `AWS_SECRET_ACCESS_KEY`, its region from `AWS_REGION`. Each run writes a
+//! `AWS_SECRET_ACCESS_KEY` - and `AWS_SESSION_TOKEN`, for temporary ones -
+//! its region from `AWS_REGION`. Each run writes a
 //! new stream with a name of its own.
 //!
 //! Each run seals with a passphrase of its own, random and never shown: what
@@ -30,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use efema::{AccessKey, Bucket, Client, Credentials, Epoch, Relay, Secret, State, StreamName, Transport};
+use efema::{AccessKey, Bucket, Client, Epoch, Relay, Secret, State, StreamName, Transport};
 use mini_vault::Summary;
 use mini_vault::{Vault, scan};
 
@@ -106,7 +107,7 @@ async fn run(cli: Cli) -> Result<bool> {
         }
         (None, Some(url)) => {
             let region = cli.region.context("--bucket needs its region: AWS_REGION or --region")?;
-            let credentials = credentials()?;
+            let credentials = mini_vault::credentials_from_env()?;
             println!("bucket {url}, stream {stream}");
             let bucket = || Ok(Bucket::new(&url, &region, credentials.clone())?);
             both_ways(bucket, work.path(), &folder, &stream, &passphrase).await?
@@ -174,13 +175,6 @@ async fn both_ways<T: Transport>(
     let down_took = started.elapsed();
     println!("down   {} files in {} - the key unlocked in {}", summary_down.applied, secs(down_took), secs(opened));
     Ok((up_took, summary, down_folder))
-}
-
-/// A bucket's credentials, from the variables every S3 tool reads.
-fn credentials() -> Result<Credentials> {
-    let id = std::env::var("AWS_ACCESS_KEY_ID").context("--bucket needs AWS_ACCESS_KEY_ID")?;
-    let secret = std::env::var("AWS_SECRET_ACCESS_KEY").context("--bucket needs AWS_SECRET_ACCESS_KEY")?;
-    Ok(Credentials::new(id, secret))
 }
 
 /// A relay of the run's own, on this machine, in `dir`.

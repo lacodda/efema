@@ -30,7 +30,8 @@ each lets one be revoked without the other.
 Through an S3 bucket instead of a relay, `--bucket` and `--region` take the
 place of `--relay` - with `--prefix` for a stream under a prefix of the
 bucket - and the credentials come from `AWS_ACCESS_KEY_ID` and
-`AWS_SECRET_ACCESS_KEY`. The same run through a bucket is on
+`AWS_SECRET_ACCESS_KEY`, with `AWS_SESSION_TOKEN` when they are
+[temporary ones](/efema/guides/temporary-credentials/). The same run through a bucket is on
 [Without a server](/efema/guides/without-a-server/#a-folder-through-a-bucket).
 
 Each keeps its folder in sync until stopped: it sends what changed in the
@@ -152,7 +153,8 @@ half of them under 4 KB, one in a hundred over 240 KB, the largest a few MB.
 `--folder` syncs a folder of your own instead - it is only read - and
 `--relay` with `FIRST_SYNC_KEY` goes through a relay of yours rather than one
 started for the run; `--bucket` with `--region` and the bucket's credentials
-in `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` goes through an S3 bucket.
+in `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (and `AWS_SESSION_TOKEN`)
+goes through an S3 bucket.
 Each run seals with a passphrase of its own that is never shown, so what it
 leaves on a relay or in a bucket can be opened by no one.
 

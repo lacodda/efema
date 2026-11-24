@@ -26,13 +26,35 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use efema::{Client, Received, Transport};
+use efema::{Client, Credentials, Received, Transport};
 use minicbor::bytes::ByteVec;
 use minicbor::{Decode, Encode};
 use sha2::{Digest, Sha256};
 
 /// The suffix of a file being written, before it takes its name.
 const TEMP_SUFFIX: &str = ".mini-vault-tmp";
+
+/// A bucket's credentials, from the variables every S3 tool reads:
+/// `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN`
+/// with them when they are temporary ones.
+///
+/// What a variable holds does not change while the program runs, so
+/// temporary credentials taken from here last one run. An app that syncs for
+/// longer than they do gives the bucket a `CredentialsProvider` instead.
+///
+/// # Errors
+///
+/// When the key's id or its secret is not set.
+pub fn credentials_from_env() -> Result<Credentials> {
+    let id = std::env::var("AWS_ACCESS_KEY_ID").context("a bucket needs AWS_ACCESS_KEY_ID")?;
+    let secret = std::env::var("AWS_SECRET_ACCESS_KEY").context("a bucket needs AWS_SECRET_ACCESS_KEY")?;
+    let credentials = Credentials::new(id, secret);
+    // Set and empty is how a shell and a CI job say "none".
+    Ok(match std::env::var("AWS_SESSION_TOKEN") {
+        Ok(token) if !token.is_empty() => credentials.with_token(token),
+        _ => credentials,
+    })
+}
 
 /// A file's content hash.
 pub type Digest32 = [u8; 32];

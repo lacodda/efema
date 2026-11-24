@@ -9,7 +9,8 @@
 //! ```
 //!
 //! Through a bucket, the credentials come from `AWS_ACCESS_KEY_ID` and
-//! `AWS_SECRET_ACCESS_KEY`, the region from `AWS_REGION` or `--region`:
+//! `AWS_SECRET_ACCESS_KEY` - with `AWS_SESSION_TOKEN`, when they are
+//! temporary ones - and the region from `AWS_REGION` or `--region`:
 //!
 //! ```console
 //! $ mini-vault --bucket https://notes.s3.eu-central-1.amazonaws.com --region eu-central-1 --folder ./notes --state ./notes-state sync
@@ -28,7 +29,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use efema::{AccessKey, Bucket, Client, Credentials, Epoch, Relay, Secret, State, StreamName, Transport, copy};
+use efema::{AccessKey, Bucket, Client, Epoch, Relay, Secret, State, StreamName, Transport, copy};
 use mini_vault::{Summary, Vault};
 
 /// Keep a folder in sync with other devices through an efema relay, or
@@ -44,7 +45,8 @@ struct Cli {
     #[arg(long, env = "MINI_VAULT_KEY", hide_env_values = true)]
     key: Option<AccessKey>,
     /// An S3 bucket to sync through instead of a relay: its address. The
-    /// credentials come from AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
+    /// credentials come from AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY,
+    /// and AWS_SESSION_TOKEN when they are temporary.
     #[arg(long, env = "MINI_VAULT_BUCKET")]
     bucket: Option<String>,
     /// The bucket's region.
@@ -91,7 +93,8 @@ enum Command {
         #[arg(long, env = "MINI_VAULT_TO_KEY", hide_env_values = true)]
         to_key: Option<AccessKey>,
         /// The bucket to copy to, reached with AWS_ACCESS_KEY_ID and
-        /// AWS_SECRET_ACCESS_KEY.
+        /// AWS_SECRET_ACCESS_KEY, and AWS_SESSION_TOKEN when they are
+        /// temporary.
         #[arg(long, env = "MINI_VAULT_TO_BUCKET")]
         to_bucket: Option<String>,
         /// Its region, if not the one --region gives.
@@ -124,9 +127,7 @@ impl Remote {
             }
             (None, Some(url)) => {
                 let region = region.context("a bucket needs its region: AWS_REGION or --region")?;
-                let id = std::env::var("AWS_ACCESS_KEY_ID").context("a bucket needs AWS_ACCESS_KEY_ID")?;
-                let secret = std::env::var("AWS_SECRET_ACCESS_KEY").context("a bucket needs AWS_SECRET_ACCESS_KEY")?;
-                let bucket = Bucket::new(&url, &region, Credentials::new(id, secret))?;
+                let bucket = Bucket::new(&url, &region, mini_vault::credentials_from_env()?)?;
                 Ok(Self::Bucket(match prefix {
                     Some(prefix) => bucket.within(&prefix)?,
                     None => bucket,
