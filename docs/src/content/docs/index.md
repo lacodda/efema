@@ -74,9 +74,11 @@ what changes against a relay.
 
 ## Status
 
-0.10.0 is the relay and the Rust client library,
+0.11.0 is the relay and the Rust client library,
 [`efema`](https://docs.rs/efema), which syncs through a relay or through an S3
-bucket with nothing to run ([Without a server](/efema/guides/without-a-server/)),
+bucket with nothing to run ([Without a server](/efema/guides/without-a-server/)) -
+with credentials held for good, or handed out for an hour and replaced before
+they run out ([Temporary credentials](/efema/guides/temporary-credentials/)) -
 and moves a stream between them - or between relays - with every device going
 on from where it stood ([Moving a stream](/efema/guides/moving-a-stream/));
 and a relay safe to leave reachable behind an HTTPS proxy: access keys to spaces, that read or that write; limits per key,

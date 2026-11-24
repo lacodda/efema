@@ -22,6 +22,21 @@ A release is added with:
 $ git cliff --unreleased --tag vX.Y.Z --prepend CHANGELOG.md
 ```
 
+## [0.11.0] - 2026-11-24
+
+### Features
+
+- Read a session token from AWS_SESSION_TOKEN
+- Take temporary credentials from a provider
+
+### Documentation
+
+- Show the relay's start and the server upgrade to 0.10.0 as they printed
+
+### Standard
+
+- Take the line's standard 2026.11.6
+
 ## [0.10.0] - 2026-11-11
 
 ### Breaking Changes

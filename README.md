@@ -142,8 +142,9 @@ The model, sealing, the threat model, every command and the protocol:
 
 ## Status
 
-0.10.0 is the relay and the Rust client, which syncs through a relay or an S3
-bucket and moves a stream between them. The format is a contract checked
+0.11.0 is the relay and the Rust client, which syncs through a relay or an S3
+bucket - with credentials held for good or handed out for an hour - and
+moves a stream between them. The format is a contract checked
 against [vectors](https://lacodda.github.io/efema/reference/format/); 1.0
 freezes it once two apps live on it. [CHANGELOG](https://github.com/lacodda/efema/blob/main/CHANGELOG.md).
 
